@@ -40,13 +40,15 @@ safari/xcode/convert.sh
 open build/safari/xcode/*/*.xcodeproj
 ```
 
+转换时 Xcode 16 会提示 `persistent` 是「不支持的键」，可以忽略：iOS 只能运行非常驻的后台页，所以 manifest 里特意显式写了 `"persistent": false`，这本来也是 MV3 的默认值。
+
 在 Xcode 里选择「(macOS)」scheme，目标选 My Mac，点 Run。如果没有付费开发者账号，签名选「Sign to Run Locally」，然后在 Safari 的开发者设置里打开「允许未签名的扩展」。这个开关每次重启 Safari 都要重新打开，用付费账号签名后就不需要了。
 
 最后到 Safari → 设置 → 扩展，勾选 Bypass Paywalls Clean。
 
 ### 方式 C：下载 CI 打包好的 macOS 应用
 
-GitHub Actions 的「Safari extension」工作流会上传以下产物：
+GitHub Actions 的「Safari extension」工作流会上传以下产物（在仓库的 Actions 页面打开某次运行，在页面底部的 Artifacts 里下载，保留 90 天）：
 
 - `safari-macos-app`：ad-hoc 签名的 `Bypass Paywalls Clean.app`
 - `safari-xcode-project`：生成好的 Xcode 工程（macOS + iOS）
