@@ -1,8 +1,10 @@
 name: Safari extension
 
 on:
+  # Branch work is covered by the pull_request trigger; push only runs on main
+  # so that a push to a PR branch does not build twice.
   push:
-    branches: [main, safari-port]
+    branches: [main]
     paths:
       - 'safari/**'
       - 'bypass-paywalls-chrome-clean-master.zip'

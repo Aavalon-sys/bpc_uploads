@@ -109,8 +109,10 @@ function transformManifest(manifest) {
   if (m.manifest_version !== 3) throw new Error(`expected a manifest v3 source, got v${m.manifest_version}`);
   // Event page instead of a service worker: Safari supports both, but only a
   // page has DOMParser, which replaces Chrome's offscreen document.
-  // persistent: false must be explicit, iOS/iPadOS only run non-persistent
-  // background pages (Apple's converter warns otherwise).
+  // persistent: false is explicit because iOS/iPadOS only run non-persistent
+  // background pages; without it Apple's converter warns that the extension
+  // will not run on iOS. (The Xcode 16 converter then lists `persistent` as
+  // an unsupported MV3 key, which is harmless: false is the MV3 default.)
   m.background = { scripts: ['safari-compat.js', 'sites.js', 'background.js'], persistent: false };
   // Chrome-only keys. `key` is kept on purpose: its presence selects the
   // extension's Chromium code paths (ext_chromium), which match Safari's MV3
