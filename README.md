@@ -11,3 +11,4 @@ Chrome: [https://gitflic.ru/project/magnolia1234/bypass-paywalls-chrome-clean#in
 
 Firefox: [https://gitflic.ru/project/magnolia1234/bypass-paywalls-firefox-clean#installation](https://gitflic.ru/project/magnolia1234/bypass-paywalls-firefox-clean#installation)
 
+Safari (built from the Chrome release in this repository): [safari/README.md](safari/README.md)
