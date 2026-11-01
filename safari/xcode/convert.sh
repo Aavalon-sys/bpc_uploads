@@ -40,7 +40,14 @@ done
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 echo "+ xcrun $TOOL $EXT_DIR ${ARGS[*]}"
-xcrun "$TOOL" "$EXT_DIR" "${ARGS[@]}" </dev/null
+LOG="$(mktemp)"
+xcrun "$TOOL" "$EXT_DIR" "${ARGS[@]}" </dev/null 2>&1 | tee "$LOG"
+# iOS/iPadOS cannot load the extension with a persistent background page.
+if grep -q "Persistent background pages are not supported" "$LOG"; then
+  echo "error: the converter considers the background page persistent; the extension would not load on iOS" >&2
+  exit 1
+fi
+rm -f "$LOG"
 
 PROJECT="$(find "$OUT_DIR" -maxdepth 3 -name '*.xcodeproj' | head -1)"
 if [ -z "$PROJECT" ]; then

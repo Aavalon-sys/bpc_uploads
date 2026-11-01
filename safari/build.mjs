@@ -109,13 +109,17 @@ function transformManifest(manifest) {
   if (m.manifest_version !== 3) throw new Error(`expected a manifest v3 source, got v${m.manifest_version}`);
   // Event page instead of a service worker: Safari supports both, but only a
   // page has DOMParser, which replaces Chrome's offscreen document.
-  m.background = { scripts: ['safari-compat.js', 'sites.js', 'background.js'] };
+  // persistent: false must be explicit, iOS/iPadOS only run non-persistent
+  // background pages (Apple's converter warns otherwise).
+  m.background = { scripts: ['safari-compat.js', 'sites.js', 'background.js'], persistent: false };
   // Chrome-only keys. `key` is kept on purpose: its presence selects the
   // extension's Chromium code paths (ext_chromium), which match Safari's MV3
   // APIs best; Safari ignores it.
   delete m.minimum_chrome_version;
   delete m.incognito; // "split" is not supported; Safari always uses spanning mode
   m.permissions = (m.permissions || []).filter((p) => p !== 'offscreen');
+  // Safari always opens the options page in a tab and flags this key as unsupported.
+  if (m.options_ui) delete m.options_ui.open_in_tab;
   m.action = { ...(m.action || {}), default_icon: { 128: 'bypass.png' } };
   return m;
 }

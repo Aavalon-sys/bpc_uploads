@@ -63,7 +63,8 @@ test('Safari build: the patched background uses the compat layer', () => {
   assert.ok(!bg.includes('ext_api.declarativeNetRequest.updateSessionRules('));
   assert.ok(bg.includes('bpcSafari.offscreenParse(message.data)'));
   const manifest = JSON.parse(fs.readFileSync(path.join(safariDir, 'manifest.json'), 'utf8'));
-  assert.deepEqual(manifest.background, { scripts: ['safari-compat.js', 'sites.js', 'background.js'] });
+  assert.deepEqual(manifest.background, { scripts: ['safari-compat.js', 'sites.js', 'background.js'], persistent: false });
+  assert.deepEqual(manifest.options_ui, { page: 'options/options.html' });
   assert.ok(!manifest.permissions.includes('offscreen'));
   assert.equal(manifest.incognito, undefined);
   assert.match(fs.readFileSync(path.join(safariDir, 'lib', 'purify.min.js'), 'utf8'), /DOMPurify \d/);
