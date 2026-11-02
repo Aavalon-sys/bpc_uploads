@@ -83,7 +83,7 @@ Safari 不会自动授予扩展访问网站的权限。启用扩展后，在工�
 | Safari 不支持修改响应头（`responseHeaders`） | 跳过这类规则（见下方「已知限制」） |
 | Chrome 版的 DOMPurify 是空实现 | 换成 Firefox 版发布包里的真实 DOMPurify |
 
-以当前版本 4.4.8.3 为例：启用全部站点时，Chrome 版生成 771 条规则；Safari 版实际应用 1083 条（其中 221 条正则规则被改写拆分），跳过 28 条。
+以当前版本 4.4.8.4 为例：启用全部站点时，Chrome 版生成 770 条规则；Safari 版实际应用 1081 条（其中 220 条正则规则被改写拆分），跳过 28 条。
 
 ## 已知限制
 
@@ -96,7 +96,7 @@ Safari 不会自动授予扩展访问网站的权限。启用扩展后，在工�
 ## 验证清单（第一次安装后）
 
 1. Safari 开发 菜单 → Web Extension Background Content → Bypass Paywalls Clean，打开后台页的 Web 检查器
-2. 控制台里应该能看到一行 `BPC Safari: 771 rules requested, 1083 applied (...)`。如果有规则被 Safari 拒绝，这行会显示 `rejected by Safari` 及数量
+2. 控制台里应该能看到一行 `BPC Safari: 770 rules requested, 1081 applied (...)`（4.4.8.4 启用全部站点时的数字，随版本和启用的站点变化）。如果有规则被 Safari 拒绝，这行会显示 `rejected by Safari` 及数量
 3. 在控制台执行 `bpcSafari.report.lastAddCall.droppedRules`，可以查看具体跳过了哪些规则、原因是什么
 4. 打开一个已授权的支持站点，确认文章能正常显示
 
