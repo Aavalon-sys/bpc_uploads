@@ -51,6 +51,7 @@ open build/safari/xcode/*/*.xcodeproj
 GitHub Actions 的「Safari extension」工作流会上传以下产物（在仓库的 Actions 页面打开某次运行，在页面底部的 Artifacts 里下载，保留 90 天）：
 
 - `safari-macos-app`：ad-hoc 签名的 `Bypass Paywalls Clean.app`
+- `safari-ios-ipa-unsigned`：未签名的 iOS/iPadOS 安装包（`.ipa`），用法见下方「iOS / iPadOS」
 - `safari-xcode-project`：生成好的 Xcode 工程（macOS + iOS）
 - `safari-extension`：扩展目录的 zip
 
@@ -64,7 +65,32 @@ xattr -dr com.apple.quarantine "Bypass Paywalls Clean.app"
 
 ### iOS / iPadOS
 
-用 Xcode 打开 `safari-xcode-project`（或方式 B 生成的工程），选择「(iOS)」scheme，用自己的 Apple ID 签名后装到设备上。免费账号的签名 7 天后过期。装好后到 设置 → App → Safari → 扩展 里启用。
+需要 iOS/iPadOS 16.4 或更新版本。iOS 只能安装签过名的 App，所以下面两种方式都要用你自己的 Apple ID 或开发者证书签名。免费 Apple ID 的签名 7 天后过期，每台设备最多同时装约 3 个这样签名的 App；这个 App 带一个扩展，很可能占其中 2 个。
+
+**用 CI 生成的 ipa（不需要 Mac）**
+
+1. 从 GitHub Actions 下载 `safari-ios-ipa-unsigned`，解压得到 `Bypass-Paywalls-Clean-unsigned.ipa`（未签名）
+2. 用 [Sideloadly](https://sideloadly.io/)（Windows/macOS）或 AltStore / SideStore 安装：选这个 ipa，登录你的 Apple ID，工具会签名并装到设备上。**不要选「移除 App 扩展」**：扩展就是 Safari 插件本身；AltStore 问是否保留扩展时选保留
+3. iOS 16 及以上需先打开 设置 → 隐私与安全性 → 开发者模式
+4. 7 天后签名过期，重新用工具安装一遍（Sideloadly 和 AltStore 都支持续签）
+
+如果你有付费开发者账号，也可以用自己的证书和描述文件给 ipa 重签名（App 和扩展的 bundle ID 各需要一个描述文件）。
+
+**用 Xcode**
+
+用 Xcode 打开 `safari-xcode-project`（或方式 B 生成的工程），选择「(iOS)」scheme，选你的设备和 Apple ID 账号，点 Run。
+
+装好后先打开一次 App，再到 设置 → App → Safari → 扩展 里启用 Bypass Paywalls Clean，并把「所有网站」设为允许。
+
+本地生成未签名 ipa（需要 Mac + Xcode）：
+
+```bash
+safari/xcode/build-app.sh build/safari/xcode ios build/safari/dd
+```
+
+```bash
+safari/xcode/make-ipa.sh build/safari/dd build/safari/Bypass-Paywalls-Clean-unsigned.ipa
+```
 
 ## 3. 授权网站访问（必须）
 
@@ -138,5 +164,5 @@ git merge upstream/main
 
 - `build.mjs`：构建脚本（解压 Chrome 版 → 打补丁 → 生成 Safari manifest）
 - `src/safari-compat.js`：兼容层，作为第一个后台脚本加载
-- `xcode/convert.sh`、`xcode/build-app.sh`：生成 Xcode 工程、构建应用（CI 也调用这两个脚本）
+- `xcode/convert.sh`、`xcode/build-app.sh`、`xcode/make-ipa.sh`：生成 Xcode 工程、构建应用、打包未签名 ipa（CI 也调用这些脚本）
 - `test/`：测试（`harness.mjs` 模拟浏览器 API，`webkit-rules.mjs` 是 Safari 规则模型，`sampler.mjs` 做正则等价性采样）
