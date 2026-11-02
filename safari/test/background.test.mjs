@@ -68,7 +68,14 @@ test('Safari build: the patched background uses the compat layer', () => {
   assert.ok(!manifest.permissions.includes('offscreen'));
   assert.equal(manifest.incognito, undefined);
   assert.match(fs.readFileSync(path.join(safariDir, 'lib', 'purify.min.js'), 'utf8'), /DOMPurify \d/);
-  assert.equal(buildResult.info.patches.length, 4);
+  assert.equal(buildResult.info.patches.length, 5);
+  assert.ok(manifest.permissions.includes('declarativeNetRequest'));
+  assert.ok(fs.readFileSync(path.join(safariDir, 'lib', 'empty.js'), 'utf8').trim().length > 0);
+  const popup = fs.readFileSync(path.join(safariDir, 'options', 'popup.html'), 'utf8');
+  assert.match(popup, /id="bpc_safari_diag"/);
+  assert.match(popup, /<script src="\/safari-popup.js"><\/script>\n<\/body>/);
+  for (const f of ['safari-popup.js', 'safari-diagnostics.html', 'safari-diagnostics.js'])
+    assert.ok(fs.existsSync(path.join(safariDir, f)), f);
 });
 
 for (const version of [[16, 4], [17, 0], [18, 4], [26, 0]]) {
@@ -203,4 +210,63 @@ for (const errorStyle of ['plain', 'webkit']) test(`Safari build: rules Safari r
     const adds = run.dnrCalls.filter((c) => (c.addRules || []).length).length;
     assert.ok(adds <= expectedRefused.length + 2, `${adds} add calls for ${expectedRefused.length} refused rules`);
   }
+});
+
+// --- Content scripts -------------------------------------------------------
+
+const ARTICLE = 'https://www.nytimes.com/2024/05/01/world/some-article.html';
+
+function pageLoaded(run, tabId, url) {
+  for (const listener of run.api.tabs.onUpdated.listeners)
+    listener(tabId, { status: 'complete' }, { id: tabId, url, status: 'complete', active: true });
+}
+
+const injections = (run, tabId) => run.scriptCalls.filter((c) => c.target && c.target.tabId === tabId && (c.files || []).includes('contentScript.js'));
+
+test('Safari build: content scripts are injected on an enabled site, like in Chrome', async () => {
+  const safari = await runBackground({ extDir: safariDir, flavor: 'safari', safariVersion: [18, 4] });
+  const chrome = await runBackground({ extDir: chromeDir, flavor: 'chrome' });
+  assert.ok([...safari.sandbox.enabledSites].includes('nytimes.com'), 'nytimes.com should be enabled after install');
+  for (const r of [safari, chrome]) {
+    pageLoaded(r, 7, ARTICLE);
+    await r.settle(1200);
+  }
+  const s = injections(safari, 7);
+  const c = injections(chrome, 7);
+  assert.equal(s.length, 1, 'contentScript.js should be injected once');
+  assert.deepEqual(s[0].files, ['lib/empty.js', 'contentScript.js', 'cs_local/contentScript_en.js']);
+  assert.deepEqual(s, c);
+  assert.deepEqual(safari.errors.map(String), []);
+});
+
+test('Safari build: nothing is injected when Safari hides the tab URL (no site access)', async () => {
+  const run = await runBackground({ extDir: safariDir, flavor: 'safari', safariVersion: [18, 4] });
+  pageLoaded(run, 9, ''); // Safari reports an empty URL for sites the extension may not access
+  await run.settle(1200);
+  assert.deepEqual(injections(run, 9), []);
+  assert.deepEqual(run.scriptCalls.filter((c) => c.target && c.target.tabId === 9), []);
+});
+
+test('Safari build: the diagnostics message reports the background state', async () => {
+  const run = await runBackground({ extDir: safariDir, flavor: 'safari', safariVersion: [17, 0] });
+  const replies = [];
+  for (const listener of run.api.runtime.onMessage.listeners)
+    listener({ request: 'bpcSafariDiag', url: ARTICLE }, {}, (r) => replies.push(r));
+  assert.equal(replies.length, 1, 'exactly one listener answers');
+  const info = replies[0];
+  assert.equal(info.backgroundLoaded, true);
+  assert.equal(info.siteEnabled, true);
+  assert.equal(info.siteDomain, 'nytimes.com');
+  assert.equal(info.selfHosted, true);
+  assert.equal(info.chromiumCodePath, true);
+  assert.ok(info.enabledSites > 500);
+  assert.deepEqual([...info.errors], []);
+  assert.equal(info.lastAddCall.rulesOut, run.sessionRules.length);
+  assert.equal(info.legacyDomainKeys, true);
+  // Also kept in storage for when the background page is not running.
+  assert.equal(run.store.bpc_safari_report.lastAddCall.rulesOut, run.sessionRules.length);
+  const other = [];
+  for (const listener of run.api.runtime.onMessage.listeners)
+    listener({ request: 'something_else' }, {}, (r) => other.push(r));
+  assert.deepEqual(other, []);
 });

@@ -120,6 +120,10 @@ function transformManifest(manifest) {
   delete m.minimum_chrome_version;
   delete m.incognito; // "split" is not supported; Safari always uses spanning mode
   m.permissions = (m.permissions || []).filter((p) => p !== 'offscreen');
+  // Chrome's declarativeNetRequestWithHostAccess limits every rule to sites the
+  // user granted; plain declarativeNetRequest lets block rules work without it
+  // (header rules and content scripts still need site access in Safari).
+  if (!m.permissions.includes('declarativeNetRequest')) m.permissions.push('declarativeNetRequest');
   // Safari always opens the options page in a tab and flags this key as unsupported.
   if (m.options_ui) delete m.options_ui.open_in_tab;
   m.action = { ...(m.action || {}), default_icon: { 128: 'bypass.png' } };
@@ -163,6 +167,22 @@ export function build(options = {}) {
     }
     fs.writeFileSync(bgFile, bg);
 
+    // Popup: link to the Safari diagnostics page.
+    const popupFile = path.join(args.out, 'options', 'popup.html');
+    const popup = patch(fs.readFileSync(popupFile, 'utf8'), 'options/popup.html', {
+      find: '</body>',
+      replace: '<div><a href="#" id="bpc_safari_diag">Safari 诊断 / diagnostics</a></div>\n<script src="/safari-popup.js"></script>\n</body>',
+      count: 1,
+    });
+    fs.writeFileSync(popupFile, popup.text);
+    applied.push({ patch: 'popup links to the Safari diagnostics page', matches: popup.matches });
+
+    // lib/empty.js is injected before contentScript.js on most sites; give it
+    // content so that no browser treats it as a missing script.
+    const emptyLib = path.join(args.out, 'lib', 'empty.js');
+    if (fs.existsSync(emptyLib) && !fs.readFileSync(emptyLib, 'utf8').trim())
+      fs.writeFileSync(emptyLib, '/* intentionally empty (Safari build) */\n');
+
     // No other script may rely on APIs Safari lacks.
     for (const file of walk(args.out).filter((f) => f.endsWith('.js'))) {
       const text = fs.readFileSync(file, 'utf8');
@@ -184,7 +204,8 @@ export function build(options = {}) {
       }
     }
 
-    fs.copyFileSync(path.join(here, 'src', 'safari-compat.js'), path.join(args.out, 'safari-compat.js'));
+    for (const file of ['safari-compat.js', 'safari-popup.js', 'safari-diagnostics.html', 'safari-diagnostics.js'])
+      fs.copyFileSync(path.join(here, 'src', file), path.join(args.out, file));
     const safariManifest = transformManifest(manifest);
     fs.writeFileSync(path.join(args.out, 'manifest.json'), JSON.stringify(safariManifest, null, 2) + '\n');
 

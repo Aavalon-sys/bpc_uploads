@@ -521,10 +521,98 @@
   var report = {
     safariVersion: version,
     legacyDomainKeys: legacyDomainKeys,
+    startedAt: new Date().toISOString(),
     calls: 0,
     lastCall: null,
     lastAddCall: null, // last call that added rules
+    errors: [], // uncaught errors of the background page (see recordError)
   };
+
+  // Uncaught errors and rejections in the background page (this script runs
+  // first, so errors in sites.js / background.js are caught too).
+  function recordError(message) {
+    report.errors.push({ at: new Date().toISOString(), message: String(message).slice(0, 600) });
+    if (report.errors.length > 20) report.errors.shift();
+  }
+  if (typeof root.addEventListener === 'function') {
+    root.addEventListener('error', function (e) {
+      recordError((e && (e.message || e.error)) + (e && e.filename ? ' @ ' + e.filename.split('/').pop() + ':' + e.lineno : ''));
+    });
+    root.addEventListener('unhandledrejection', function (e) {
+      var r = e && e.reason;
+      recordError('unhandled rejection: ' + (r && (r.message || r) || r));
+    });
+  }
+
+  function callSummary(call) {
+    if (!call) return null;
+    var dropped = {};
+    call.droppedRules.forEach(function (d) {
+      dropped[d.reason] = (dropped[d.reason] || 0) + 1;
+    });
+    return {
+      at: call.at,
+      rulesIn: call.rulesIn,
+      rulesOut: call.rulesOut,
+      expandedRules: call.expandedRules,
+      dropped: dropped,
+      batchRejected: call.batchRejected,
+    };
+  }
+
+  // Kept in storage so that the diagnostics page can show it even when the
+  // non-persistent background page has been unloaded since.
+  function persistReport() {
+    try {
+      if (api && api.storage && api.storage.local) {
+        var p = api.storage.local.set({
+          bpc_safari_report: {
+            safariVersion: version,
+            startedAt: report.startedAt,
+            lastAddCall: callSummary(report.lastAddCall),
+            errors: report.errors.slice(-5),
+          },
+        });
+        if (p && typeof p.catch === 'function') p.catch(function () {});
+      }
+    } catch (e) {
+      // diagnostics only
+    }
+  }
+
+  // State of the running background page, for safari-diagnostics.html.
+  // enabledSites, self_hosted, ext_chromium, isSiteEnabled and matchUrlDomain
+  // are globals of background.js.
+  function diagnostics(url) {
+    var info = {
+      safariVersion: version,
+      legacyDomainKeys: legacyDomainKeys,
+      startedAt: report.startedAt,
+      lastAddCall: callSummary(report.lastAddCall),
+      errors: report.errors.slice(),
+    };
+    try {
+      info.backgroundLoaded = typeof isSiteEnabled === 'function';
+      info.enabledSites = typeof enabledSites !== 'undefined' ? enabledSites.length : null;
+      info.selfHosted = typeof self_hosted !== 'undefined' ? self_hosted : null;
+      info.chromiumCodePath = typeof ext_chromium !== 'undefined' ? ext_chromium : null;
+      if (url && typeof isSiteEnabled === 'function') {
+        info.siteEnabled = !!isSiteEnabled({ url: url });
+        info.siteDomain = (typeof matchUrlDomain === 'function' && typeof enabledSites !== 'undefined' && matchUrlDomain(enabledSites, url)) || '';
+      }
+    } catch (e) {
+      info.error = String(e && e.message || e);
+    }
+    return info;
+  }
+
+  if (api && api.runtime && api.runtime.onMessage) {
+    api.runtime.onMessage.addListener(function (message, sender, sendResponse) {
+      if (!message || message.request !== 'bpcSafariDiag') return undefined;
+      sendResponse(diagnostics(message.url));
+      return undefined;
+    });
+  }
 
   function summarize(res) {
     var dropped = {};
@@ -629,8 +717,9 @@
         result.rulesOut = out.length - result.droppedRules.filter(function (d) { return /^rejected/.test(d.reason); }).length;
         report.calls++;
         report.lastCall = result;
-        if (addRules.length) report.lastAddCall = result;
         if (addRules.length) {
+          report.lastAddCall = result;
+          persistReport();
           console.info('BPC Safari: ' + result.rulesIn + ' rules requested, ' + result.rulesOut + ' applied (' +
             result.expandedRules + ' regex rules rewritten, ' + result.droppedRules.length + ' skipped)' +
             (result.droppedRules.length ? ' ' + JSON.stringify(summarize(result)) : ''));
@@ -703,6 +792,7 @@
     offscreenParse: offscreenParse,
     report: report,
     // exposed for tests
+    _diagnostics: diagnostics,
     _rewriteRegex: rewriteRegex,
     _parseRegex: parseRegex,
     _webkitRegexProblem: webkitRegexProblem,

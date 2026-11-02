@@ -92,11 +92,21 @@ safari/xcode/build-app.sh build/safari/xcode ios build/safari/dd
 safari/xcode/make-ipa.sh build/safari/dd build/safari/Bypass-Paywalls-Clean-unsigned.ipa
 ```
 
-## 3. 授权网站访问（必须）
+## 3. 授权网站访问（必须，否则完全不起作用）
 
-Safari 不会自动授予扩展访问网站的权限。启用扩展后，在工具栏点扩展图标，选择「在每个网站上始终允许」，或者到 设置 → 扩展 → Bypass Paywalls Clean → 编辑网站 里把「其他网站」设为允许。
+Safari 默认不允许扩展访问任何网站。没有授权的网站上，Safari 不会把网页地址告诉扩展，也不允许它注入脚本，所以扩展什么都做不了。修改请求头（Googlebot UA、Referer 等）和清除 Cookie 也同样需要授权。
 
-没有授权的网站上，修改请求头（Googlebot UA、Referer 等）和清除 Cookie 都不会生效。
+- **macOS**：Safari 设置 → 扩展 → Bypass Paywalls Clean → 「编辑网站…」→ 把「访问其他网站时」设为「允许」。也可以在新闻网站上点工具栏的扩展图标，选「在每个网站上始终允许」
+- **iPhone / iPad**：设置 → App → Safari → 扩展 → Bypass Paywalls Clean → 把「其他网站」设为「允许」
+
+改完后刷新新闻页面。只点「允许一天」的话，第二天会失效。
+
+## 排查问题：Safari 诊断页
+
+在要测试的新闻网站上点开扩展图标，点弹窗底部的「Safari 诊断」，会打开一个诊断页（iPhone 上也能用）：
+
+- **结论**：直接指出问题，例如没有网站权限、选项里没有启用站点、后台脚本没有运行、脚本没有注入到当前页面
+- **详细信息**：Safari 版本、已授权的网站、启用的站点数、实际装上的规则数、后台报错、当前页面的检测结果。点「复制报告」可以把全部内容发给开发者
 
 ## 和 Chrome 版的区别（构建时自动完成）
 
@@ -121,10 +131,9 @@ Safari 不会自动授予扩展访问网站的权限。启用扩展后，在工�
 
 ## 验证清单（第一次安装后）
 
-1. Safari 开发 菜单 → Web Extension Background Content → Bypass Paywalls Clean，打开后台页的 Web 检查器
-2. 控制台里应该能看到一行 `BPC Safari: 770 rules requested, 1081 applied (...)`（4.4.8.4 启用全部站点时的数字，随版本和启用的站点变化）。如果有规则被 Safari 拒绝，这行会显示 `rejected by Safari` 及数量
-3. 在控制台执行 `bpcSafari.report.lastAddCall.droppedRules`，可以查看具体跳过了哪些规则、原因是什么
-4. 打开一个已授权的支持站点，确认文章能正常显示
+1. 确认已按第 3 节授权网站访问
+2. 在一个支持的新闻网站上打开「Safari 诊断」，结论里应该是「扩展的脚本已注入到当前页面」
+3. （macOS，可选）Safari 开发 菜单 → Web Extension Background Content → Bypass Paywalls Clean，打开后台页的 Web 检查器。控制台里应该能看到一行 `BPC Safari: 770 rules requested, 1081 applied (...)`（4.4.8.4 启用全部站点时的数字，随版本和启用的站点变化）；执行 `bpcSafari.report.lastAddCall.droppedRules` 可以查看具体跳过了哪些规则
 
 ## 测试
 
@@ -138,6 +147,8 @@ node --test --test-concurrency=1 safari/test/*.test.mjs
 - 构建产物在 Safari 16.4、17、18.4、26 下，所有规则都满足 Safari 的限制，并且和 Chrome 版逐条对应；
 - 改写前后的正则匹配完全相同的 URL（用随机样本和 JS 正则引擎核对）；
 - 切换站点后不留下残余的改写规则；
+- 有网站权限时，内容脚本的注入和 Chrome 版完全一致；没有权限时（Safari 给的网址为空）不会注入；
+- 诊断页在「没有网站权限」「一切正常」「后台没有响应」等情况下给出正确的结论；
 - 模拟 Safari 拒绝某类规则时，其余规则照常生效。
 
 `safari/test/webkit-rules.mjs` 是根据 Apple 文档、MDN 兼容性数据和 WebKit 内容拦截器正则子集整理出的**近似**模型，故意定得偏严。真实 Safari 运行时会用自己的 `isRegexSupported()` 再判断一次。
@@ -164,5 +175,6 @@ git merge upstream/main
 
 - `build.mjs`：构建脚本（解压 Chrome 版 → 打补丁 → 生成 Safari manifest）
 - `src/safari-compat.js`：兼容层，作为第一个后台脚本加载
+- `src/safari-diagnostics.html`、`src/safari-diagnostics.js`、`src/safari-popup.js`：诊断页和弹窗里的入口链接
 - `xcode/convert.sh`、`xcode/build-app.sh`、`xcode/make-ipa.sh`：生成 Xcode 工程、构建应用、打包未签名 ipa（CI 也调用这些脚本）
 - `test/`：测试（`harness.mjs` 模拟浏览器 API，`webkit-rules.mjs` 是 Safari 规则模型，`sampler.mjs` 做正则等价性采样）

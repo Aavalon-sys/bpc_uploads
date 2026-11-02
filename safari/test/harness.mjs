@@ -41,6 +41,7 @@ export async function runBackground({
   const store = {};
   const dnrCalls = [];
   const dnrErrors = [];
+  const scriptCalls = [];
   const sessionRules = new Map();
   const errors = [];
   const logs = [];
@@ -204,7 +205,12 @@ export async function runBackground({
       request: (p, cb) => { if (cb) later(() => cb(true)); return Promise.resolve(true); },
       remove: (p, cb) => { if (cb) later(() => cb(true)); return Promise.resolve(true); },
     },
-    scripting: { executeScript: () => Promise.resolve([]) },
+    scripting: {
+      executeScript: (details) => {
+        scriptCalls.push(JSON.parse(JSON.stringify(details, (k, v) => (typeof v === 'function' ? '[function]' : v))));
+        return Promise.resolve([{ frameId: 0, result: undefined }]);
+      },
+    },
     webRequest: {
       onBeforeRequest: makeEvent(),
       onHeadersReceived: makeEvent(),
@@ -297,6 +303,7 @@ export async function runBackground({
     logs,
     dnrCalls,
     dnrErrors,
+    scriptCalls,
     sessionRules: [...sessionRules.values()],
     optionsOpened,
     store,
