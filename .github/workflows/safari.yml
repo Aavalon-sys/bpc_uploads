@@ -1,0 +1,96 @@
+name: Safari extension
+
+on:
+  # Branch work is covered by the pull_request trigger; push only runs on main
+  # so that a push to a PR branch does not build twice.
+  push:
+    branches: [main]
+    paths:
+      - 'safari/**'
+      - 'bypass-paywalls-chrome-clean-master.zip'
+      - 'bypass-paywalls-firefox-clean-master.zip'
+      - '.github/workflows/safari.yml'
+  pull_request:
+    paths:
+      - 'safari/**'
+      - 'bypass-paywalls-chrome-clean-master.zip'
+      - 'bypass-paywalls-firefox-clean-master.zip'
+      - '.github/workflows/safari.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: safari-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test the extension folder
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build Safari extension folder
+        run: node safari/build.mjs --zip
+      - name: Run tests
+        run: node --test --test-concurrency=1 safari/test/*.test.mjs
+      - name: Upload extension folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: safari-extension
+          path: build/safari/bypass-paywalls-clean-safari-*.zip
+          if-no-files-found: error
+
+  xcode:
+    name: Wrap in macOS/iOS app with Xcode
+    needs: test
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      APP_NAME: Bypass Paywalls Clean
+      BUNDLE_ID: io.github.aavalon-sys.bypass-paywalls-clean
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Safari extension folder
+        run: node safari/build.mjs
+      - name: Show Xcode and converter versions
+        run: |
+          xcodebuild -version
+          xcrun --find safari-web-extension-converter || true
+          xcrun --find safari-web-extension-packager || true
+          xcrun safari-web-extension-converter --help || true
+      - name: Generate Xcode project
+        run: safari/xcode/convert.sh build/safari/extension build/safari/xcode
+      - name: Build macOS app (ad-hoc signed)
+        run: safari/xcode/build-app.sh build/safari/xcode macos build/safari/dd
+      - name: Build iOS app for the simulator (unsigned)
+        run: safari/xcode/build-app.sh build/safari/xcode ios-simulator build/safari/dd
+      - name: Check the built app
+        run: |
+          APP=$(find build/safari/dd/Build/Products -maxdepth 2 -name '*.app' -path '*Release/*' | head -1)
+          echo "App: $APP"
+          APPEX=$(find "$APP" -name '*.appex' | head -1)
+          echo "Extension: $APPEX"
+          plutil -extract NSExtension.NSExtensionPointIdentifier raw "$APPEX/Contents/Info.plist"
+          test -f "$APPEX/Contents/Resources/manifest.json"
+          test -f "$APPEX/Contents/Resources/safari-compat.js"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          mkdir -p dist
+          ditto -c -k --keepParent "$APP" "dist/Bypass-Paywalls-Clean-macOS.zip"
+          (cd build/safari && zip -qr ../../dist/Bypass-Paywalls-Clean-Xcode-project.zip xcode)
+      - name: Upload macOS app
+        uses: actions/upload-artifact@v4
+        with:
+          name: safari-macos-app
+          path: dist/Bypass-Paywalls-Clean-macOS.zip
+          if-no-files-found: error
+      - name: Upload Xcode project
+        uses: actions/upload-artifact@v4
+        with:
+          name: safari-xcode-project
+          path: dist/Bypass-Paywalls-Clean-Xcode-project.zip
+          if-no-files-found: error
