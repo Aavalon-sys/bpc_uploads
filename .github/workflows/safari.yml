@@ -67,8 +67,12 @@ jobs:
         run: safari/xcode/convert.sh build/safari/extension build/safari/xcode
       - name: Build macOS app (ad-hoc signed)
         run: safari/xcode/build-app.sh build/safari/xcode macos build/safari/dd
-      - name: Build iOS app for the simulator (unsigned)
-        run: safari/xcode/build-app.sh build/safari/xcode ios-simulator build/safari/dd
+      - name: Build iOS app (unsigned)
+        run: safari/xcode/build-app.sh build/safari/xcode ios build/safari/dd
+      - name: Package unsigned IPA
+        run: |
+          safari/xcode/make-ipa.sh build/safari/dd dist/Bypass-Paywalls-Clean-unsigned.ipa
+          unzip -l dist/Bypass-Paywalls-Clean-unsigned.ipa | grep -E 'appex/(manifest\.json|safari-compat\.js|Info\.plist)$'
       - name: Check the built app
         run: |
           APP=$(find build/safari/dd/Build/Products -maxdepth 2 -name '*.app' -path '*Release/*' | head -1)
@@ -79,7 +83,6 @@ jobs:
           test -f "$APPEX/Contents/Resources/manifest.json"
           test -f "$APPEX/Contents/Resources/safari-compat.js"
           codesign --verify --deep --strict --verbose=2 "$APP"
-          mkdir -p dist
           ditto -c -k --keepParent "$APP" "dist/Bypass-Paywalls-Clean-macOS.zip"
           (cd build/safari && zip -qr ../../dist/Bypass-Paywalls-Clean-Xcode-project.zip xcode)
       - name: Upload macOS app
@@ -87,6 +90,12 @@ jobs:
         with:
           name: safari-macos-app
           path: dist/Bypass-Paywalls-Clean-macOS.zip
+          if-no-files-found: error
+      - name: Upload unsigned iOS IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: safari-ios-ipa-unsigned
+          path: dist/Bypass-Paywalls-Clean-unsigned.ipa
           if-no-files-found: error
       - name: Upload Xcode project
         uses: actions/upload-artifact@v4
