@@ -6,18 +6,18 @@
 #
 #   safari/engine/run.sh [output-dir]
 #
-# Needs macOS 15.4 or later with the Xcode command line tools, Node.js, and
-# sudo (it adds test host names to /etc/hosts and serves them on ports 80/443).
-# Meant for CI (.github/workflows/safari-engine.yml); think twice before
-# running it on your own Mac, since the /etc/hosts entries hide the real sites
-# until you remove them again (the script prints the command).
+# Needs macOS 15.4 or later with the Xcode command line tools and Node.js.
+# The test pages are served by a local proxy (safari/engine/server.mjs) that
+# only the test's own web views use, so the real sites are never contacted and
+# nothing on the machine is changed. Used by .github/workflows/safari-engine.yml.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:-$ROOT/build/safari/engine}"
 EXT="$ROOT/build/safari/extension"
 HOSTS=(www.washingtonpost.com www.nytimes.com www.ft.com www.wsj.com www.hola.com www.bpc-control.test)
-MARK="# bpc-engine-test"
+HTTPS_PORT=18443
+PROXY_PORT=18080
 
 cd "$ROOT"
 mkdir -p "$OUT"
@@ -41,16 +41,6 @@ basicConstraints = CA:FALSE
 EOF
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -keyout "$OUT/key.pem" -out "$OUT/cert.pem" -config "$OUT/openssl.cnf" 2>/dev/null
 
-echo "== Mapping the test host names to this machine"
-for host in "${HOSTS[@]}"; do
-  if ! grep -q "[[:space:]]$host[[:space:]]" /etc/hosts; then
-    echo "127.0.0.1 $host $MARK" | sudo tee -a /etc/hosts >/dev/null
-  fi
-done
-sudo dscacheutil -flushcache 2>/dev/null || true
-sudo killall -HUP mDNSResponder 2>/dev/null || true
-echo "   (undo with: sudo sed -i '' '/$MARK/d' /etc/hosts)"
-
 echo "== Compiling the WebKit host"
 cat > "$OUT/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -70,14 +60,18 @@ cat > "$OUT/Info.plist" <<'EOF'
 </plist>
 EOF
 xcrun clang -fobjc-arc -fmodules -mmacosx-version-min=15.4 \
-  -framework Cocoa -framework WebKit \
+  -framework Cocoa -framework Network -framework WebKit \
   -Wl,-sectcreate,__TEXT,__info_plist,"$OUT/Info.plist" \
   safari/engine/host.m -o "$OUT/bpc-webkit-host"
+
+# The Safari version of this machine, for a Safari-like user agent.
+SAFARI_VERSION="${SAFARI_VERSION:-$(defaults read /Applications/Safari.app/Contents/Info CFBundleShortVersionString 2>/dev/null || echo 18.6)}"
+echo "   Safari version used in the user agent: $SAFARI_VERSION"
 
 SERVER_PID=""
 stop_server() {
   if [ -n "$SERVER_PID" ]; then
-    sudo kill "$SERVER_PID" 2>/dev/null || true
+    kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
     SERVER_PID=""
   fi
@@ -89,11 +83,12 @@ run_scenario() {
   local name="$1"
   shift
   echo "== Scenario: $name"
-  sudo node safari/engine/server.mjs --cert "$OUT/cert.pem" --key "$OUT/key.pem" --log "$OUT/$name.requests.jsonl" > "$OUT/$name.server.log" 2>&1 &
+  node safari/engine/server.mjs --cert "$OUT/cert.pem" --key "$OUT/key.pem" --log "$OUT/$name.requests.jsonl" \
+    --https-port "$HTTPS_PORT" --proxy-port "$PROXY_PORT" > "$OUT/$name.server.log" 2>&1 &
   SERVER_PID=$!
   local ready=""
   for _ in $(seq 1 50); do
-    if curl -sk -o /dev/null "https://www.bpc-control.test/ready"; then
+    if curl -sk -o /dev/null -x "http://127.0.0.1:$PROXY_PORT" "https://www.bpc-control.test/ready"; then
       ready=1
       break
     fi
@@ -105,9 +100,9 @@ run_scenario() {
     exit 1
   fi
   # Start from an empty log (the readiness check above is in it).
-  sudo sh -c ": > '$OUT/$name.requests.jsonl'"
+  : > "$OUT/$name.requests.jsonl"
   local status=0
-  "$OUT/bpc-webkit-host" --extension "$EXT" --out "$OUT/$name.json" "$@" 2> "$OUT/$name.host.log" || status=$?
+  "$OUT/bpc-webkit-host" --extension "$EXT" --out "$OUT/$name.json" --proxy "127.0.0.1:$PROXY_PORT" "$@" 2> "$OUT/$name.host.log" || status=$?
   echo "   host exit status: $status"
   stop_server
 }
@@ -116,13 +111,18 @@ URLS=()
 for host in "${HOSTS[@]}"; do
   URLS+=(--url "https://$host/test/article.html")
 done
+FEW=(--url "https://www.washingtonpost.com/test/article.html" --url "https://www.hola.com/test/article.html")
 
 # The user has just enabled the extension and allowed every website.
-run_scenario enabled --load-delay 6 --grant all "${URLS[@]}"
+run_scenario enabled --safari-version "$SAFARI_VERSION" --load-delay 6 --grant all "${URLS[@]}"
+# The same with the user agent of a Safari before 18.4 (older rule syntax).
+run_scenario legacy --safari-version 17.6 --load-delay 6 --grant all "${FEW[@]}"
 # The extension is loaded while the browser starts (WebKit sends no install event then).
-run_scenario launch --load-delay 0 --grant all --url "https://www.washingtonpost.com/test/article.html" --url "https://www.hola.com/test/article.html"
+run_scenario launch --safari-version "$SAFARI_VERSION" --load-delay 0 --grant all "${FEW[@]}"
 # No website access was granted.
-run_scenario noaccess --load-delay 6 --grant none --url "https://www.washingtonpost.com/test/article.html" --url "https://www.hola.com/test/article.html"
+run_scenario noaccess --safari-version "$SAFARI_VERSION" --load-delay 6 --grant none "${FEW[@]}"
+# A Private Browsing window (extensions are off there unless the user allows it).
+run_scenario private --safari-version "$SAFARI_VERSION" --load-delay 6 --grant all --private "${FEW[@]}"
 
 echo "== Report"
 node safari/engine/report.mjs "$OUT"

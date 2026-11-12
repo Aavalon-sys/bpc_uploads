@@ -102,7 +102,28 @@ const BACKGROUND_PATCHES = [
     replace: 'bpcSafari.offscreenParse(message.data).then(function (data) { sendArticleSrc(data.tab_id, {data: data}); })',
     count: 1,
   },
+  {
+    why: 'Safari repeats the install event on every re-enable and omits it at browser start-up; set the defaults once',
+    find: /(details\.reason == "install"\) \{\s*)setDefaultOptions\(\);/,
+    replace: '$1bpcSafari.firstRun(setDefaultOptions);',
+    count: 1,
+  },
+  {
+    why: 'open the options page once during the first start, not once per caller',
+    find: 'ext_api.runtime.openOptionsPage()',
+    replace: 'bpcSafari.openOptionsPage()',
+    count: { min: 1 },
+  },
 ];
+
+// Appended to background.js: first-time setup when no install event arrives
+// (the extension was first loaded while Safari was starting).
+const BACKGROUND_APPENDIX = `
+// Safari build: see bpcSafari.firstRun in safari-compat.js.
+setTimeout(function () {
+  bpcSafari.firstRun(setDefaultOptions);
+}, 1500);
+`;
 
 function transformManifest(manifest) {
   const m = structuredClone(manifest);
@@ -165,6 +186,9 @@ export function build(options = {}) {
       bg = res.text;
       applied.push({ patch: p.why, matches: res.matches });
     }
+    if (!/\bfunction setDefaultOptions\(\)/.test(bg))
+      throw new Error('background.js: setDefaultOptions() not found; upstream code changed, update safari/build.mjs');
+    bg += BACKGROUND_APPENDIX;
     fs.writeFileSync(bgFile, bg);
 
     // Popup: link to the Safari diagnostics page.

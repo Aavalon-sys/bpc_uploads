@@ -19,7 +19,8 @@ if (!dir) {
 
 const GOOGLEBOT = /Googlebot\/2\.1/;
 const EXPECTED_HEADERS = {
-  'www.washingtonpost.com': { userAgent: GOOGLEBOT, referer: /^https:\/\/www\.google\.com\/$/, xForwardedFor: /^66\.249\.66\.1$/ },
+  // X-Forwarded-For is part of the Chrome rule too, but Safari refuses to set it.
+  'www.washingtonpost.com': { userAgent: GOOGLEBOT, referer: /^https:\/\/www\.google\.com\/$/ },
   'www.nytimes.com': { userAgent: /Google-InspectionTool/ },
   'www.ft.com': { referer: /^https:\/\/www\.google\.com\/$/ },
   'www.wsj.com': { referer: /^https:\/\/www\.drudgereport\.com\/$/ },
@@ -59,6 +60,15 @@ function describeBackground(label, bg) {
   console.log(`      permissions: ${JSON.stringify(bg.permissions)} origins=${bg.origins} ${JSON.stringify(bg.originsSample)}`);
   console.log(`      storage keys: ${(bg.storageKeys || []).join(',')}`);
   console.log(`      tabs: ${JSON.stringify(bg.tabs)}`);
+  console.log(`      user agent: ${bg.userAgent}`);
+  if (Array.isArray(bg.spy)) {
+    console.log(`      scripting.executeScript / tabs.sendMessage calls made by the extension (${bg.spy.length}):`);
+    for (const c of bg.spy.slice(0, 40)) {
+      const a = c.args && c.args[0];
+      const what = c.api === 'executeScript' ? JSON.stringify({ tab: a && a.target && a.target.tabId, files: a && a.files, world: a && a.world }) : JSON.stringify(c.args).slice(0, 260);
+      console.log(`        ${c.api} ${what} => ${c.rejected !== undefined ? 'REJECTED ' + c.rejected : c.threw !== undefined ? 'THREW ' + c.threw : c.resolved !== undefined ? 'ok ' + String(c.resolved).slice(0, 260) : 'pending/' + c.returned}`);
+    }
+  } else console.log(`      call spy: ${JSON.stringify(bg.spy)}`);
   if (Array.isArray(bg.tabEvents)) {
     console.log(`      tabs.onUpdated events seen by the extension (${bg.tabEvents.length}):`);
     for (const e of bg.tabEvents.slice(0, 40)) console.log(`        tab ${e.tabId} ${JSON.stringify(e.changeInfo)} url=${JSON.stringify(e.url)} status=${e.status}`);
@@ -143,8 +153,10 @@ function scenario(name, expect) {
 }
 
 scenario('enabled', 'working');
+scenario('legacy', 'working');
 scenario('launch', 'working');
 scenario('noaccess', 'untouched');
+scenario('private', 'untouched');
 
 console.log(`\n=== ${failures.length ? failures.length + ' check(s) failed' : 'all checks passed'} ===`);
 for (const f of failures) console.log(`  - ${f}`);

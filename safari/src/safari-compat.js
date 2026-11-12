@@ -16,11 +16,18 @@
  *      * initiatorDomains / excludedInitiatorDomains -> domains /
  *        excludedDomains on Safari < 18.4,
  *      * drops responseHeaders (not supported by Safari),
+ *      * removes request headers Safari refuses to modify (Safari 18 only
+ *        accepts a fixed list, without X-Forwarded-For) and keeps the rest
+ *        of the rule,
  *      * rewrites regexFilter patterns that WebKit cannot compile
  *        (alternation, {n,m}, \d \w \s, ...) into one or more equivalent
  *        patterns, each becoming its own rule,
  *    and, if Safari still rejects the batch, applies it in halves to isolate
  *    and skip the rules Safari refuses.
+ *  - Safari sends no install event to an extension that is first loaded while
+ *    Safari starts, so the default sites were never enabled there:
+ *    bpcSafari.firstRun() does the first-time setup exactly once, with or
+ *    without that event.
  */
 (function (root) {
   'use strict';
@@ -491,6 +498,8 @@
       if (!a.requestHeaders || !a.requestHeaders.length)
         return Promise.resolve({ rules: [], dropped: 'responseHeaders not supported by Safari' });
     }
+    if (a.type === 'modifyHeaders' && a.requestHeaders && withoutRefusedHeaders(r) === 0)
+      return Promise.resolve({ rules: [], dropped: 'only modifies request headers Safari refuses' });
     if (typeof c.regexFilter !== 'string') return Promise.resolve({ rules: [r], dropped: null });
 
     var caseSensitive = !!c.isUrlFilterCaseSensitive;
@@ -556,6 +565,8 @@
       rulesOut: call.rulesOut,
       expandedRules: call.expandedRules,
       dropped: dropped,
+      strippedHeaders: call.strippedHeaders,
+      refusedHeaders: Object.keys(refusedHeaders),
       batchRejected: call.batchRejected,
     };
   }
@@ -622,55 +633,102 @@
     return dropped;
   }
 
-  // Safari reports invalid rules as "Rule with id N is invalid. ..."; when the
-  // message names a rule of the batch, only that rule is dropped and the rest
-  // is retried (each failed attempt is cheap, each successful one recompiles
-  // the content blocker). Otherwise the batch is bisected.
-  var MAX_ID_RETRIES = 500;
-  function applyBatch(rules, removeRuleIds, result) {
-    var pending = rules.slice();
-    var retries = 0;
+  // Request headers Safari refused to modify in this session (lower case).
+  // Safari 18 only accepts a fixed list of header names and rejects the whole
+  // update for any other ("The header `X-Forwarded-For` is not recognized.").
+  var refusedHeaders = {};
 
-    function rejectedRuleIndex(err) {
-      var m = /\bid\s+(\d+)\b/i.exec((err && err.message) || '');
-      if (!m) return -1;
-      var id = parseInt(m[1], 10);
-      for (var k = 0; k < pending.length; k++) if (pending[k].id === id) return k;
-      return -1;
-    }
+  // Removes the refused headers from a modifyHeaders rule, in place.
+  // Returns the number of request headers left.
+  function withoutRefusedHeaders(rule) {
+    var headers = rule.action.requestHeaders || [];
+    var kept = headers.filter(function (h) {
+      return !refusedHeaders[String(h && h.header).toLowerCase()];
+    });
+    if (kept.length !== headers.length) rule.action.requestHeaders = kept;
+    return kept.length;
+  }
 
-    function retry(err) {
-      var idx = rejectedRuleIndex(err);
-      if (idx >= 0 && retries++ < MAX_ID_RETRIES) {
-        result.droppedRules.push({ id: pending[idx].id, reason: 'rejected by Safari: ' + err.message, rule: pending[idx] });
-        pending.splice(idx, 1);
-        if (!pending.length) return Promise.resolve();
-        return callDnr('updateSessionRules', { addRules: pending }).catch(retry);
-      }
-      return addInChunks(pending, result.droppedRules);
-    }
+  function refusedHeaderIn(err) {
+    var m = /header `([^`]+)` (?:is not recognized|cannot be modified)/i.exec((err && err.message) || '');
+    return m ? m[1].toLowerCase() : null;
+  }
 
-    return callDnr('updateSessionRules', { addRules: pending, removeRuleIds: removeRuleIds }).catch(function (err) {
-      result.batchRejected = err.message;
-      // Nothing was applied: do the removals on their own, then add again.
-      return callDnr('updateSessionRules', { removeRuleIds: removeRuleIds }).catch(function () {}).then(function () {
-        return retry(err);
-      });
+  // Adds rules, coping with the ways Safari refuses an update. Safari reports
+  // an invalid rule as "Rule with id N is invalid. <reason>" and rejects the
+  // whole call (a failed attempt is cheap, a successful one recompiles the
+  // content blocker):
+  //  - when the reason is a request header Safari refuses, that header is
+  //    removed from the rules and the rest of each rule is kept;
+  //  - otherwise, when the message names a rule of the list, that rule is
+  //    dropped;
+  //  - without a usable message the list is applied in halves until the
+  //    refused rules are isolated.
+  var MAX_NAMED_RETRIES = 500;
+  function addRulesTolerantly(rules, result) {
+    if (!rules.length) return Promise.resolve();
+    return callDnr('updateSessionRules', { addRules: rules }).then(function () {
+      result.rulesOut += rules.length;
+    }, function (err) {
+      return afterRejection(rules, result, err);
     });
   }
 
-  // Adds rules, splitting the batch when Safari rejects it so that a single
-  // bad rule cannot take the whole set down.
-  function addInChunks(rules, droppedRules) {
-    if (!rules.length) return Promise.resolve();
-    return callDnr('updateSessionRules', { addRules: rules }).catch(function (err) {
-      if (rules.length === 1) {
-        droppedRules.push({ id: rules[0].id, reason: 'rejected by Safari: ' + err.message, rule: rules[0] });
-        return;
+  // Decides what to change after Safari rejected `rules` with `err`, then
+  // tries again.
+  function afterRejection(rules, result, err) {
+    if (!result.batchRejected) result.batchRejected = err.message;
+
+    var header = refusedHeaderIn(err);
+    if (header) {
+      refusedHeaders[header] = true;
+      var changed = 0;
+      var kept = rules.filter(function (rule) {
+        if (!rule.action || rule.action.type !== 'modifyHeaders' || !rule.action.requestHeaders) return true;
+        var before = rule.action.requestHeaders.length;
+        var left = withoutRefusedHeaders(rule);
+        if (left === before) return true;
+        changed++;
+        if (left) return true;
+        result.droppedRules.push({ id: rule.id, reason: 'only modifies request headers Safari refuses', rule: rule });
+        return false;
+      });
+      if (changed) {
+        result.strippedHeaders[header] = (result.strippedHeaders[header] || 0) + changed;
+        return addRulesTolerantly(kept, result);
       }
-      var mid = Math.ceil(rules.length / 2);
-      return addInChunks(rules.slice(0, mid), droppedRules).then(function () {
-        return addInChunks(rules.slice(mid), droppedRules);
+    }
+
+    var named = /\bid\s+(\d+)\b/i.exec(err.message || '');
+    if (named && result.namedRetries < MAX_NAMED_RETRIES) {
+      var id = parseInt(named[1], 10);
+      for (var k = 0; k < rules.length; k++) {
+        if (rules[k].id === id) {
+          result.namedRetries++;
+          result.droppedRules.push({ id: id, reason: 'rejected by Safari: ' + err.message, rule: rules[k] });
+          return addRulesTolerantly(rules.slice(0, k).concat(rules.slice(k + 1)), result);
+        }
+      }
+    }
+
+    if (rules.length === 1) {
+      result.droppedRules.push({ id: rules[0].id, reason: 'rejected by Safari: ' + err.message, rule: rules[0] });
+      return undefined;
+    }
+    var mid = Math.ceil(rules.length / 2);
+    return addRulesTolerantly(rules.slice(0, mid), result).then(function () {
+      return addRulesTolerantly(rules.slice(mid), result);
+    });
+  }
+
+  function applyBatch(rules, removeRuleIds, result) {
+    return callDnr('updateSessionRules', { addRules: rules, removeRuleIds: removeRuleIds }).then(function () {
+      result.rulesOut += rules.length;
+    }, function (err) {
+      result.batchRejected = err.message;
+      // Nothing was applied: do the removals on their own, then add again.
+      return callDnr('updateSessionRules', { removeRuleIds: removeRuleIds }).catch(function () {}).then(function () {
+        return afterRejection(rules, result, err);
       });
     });
   }
@@ -690,6 +748,8 @@
       expandedRules: 0,
       partialRules: 0,
       droppedRules: [],
+      strippedHeaders: {}, // refused header name -> number of rules it was removed from
+      namedRetries: 0,
       batchRejected: false,
     };
 
@@ -712,9 +772,7 @@
         if (res.partial) result.partialRules++;
         out = out.concat(res.rules);
       });
-      result.rulesOut = out.length;
       return applyBatch(out, removeRuleIds, result).then(function () {
-        result.rulesOut = out.length - result.droppedRules.filter(function (d) { return /^rejected/.test(d.reason); }).length;
         report.calls++;
         report.lastCall = result;
         if (addRules.length) {
@@ -722,6 +780,7 @@
           persistReport();
           console.info('BPC Safari: ' + result.rulesIn + ' rules requested, ' + result.rulesOut + ' applied (' +
             result.expandedRules + ' regex rules rewritten, ' + result.droppedRules.length + ' skipped)' +
+            (Object.keys(refusedHeaders).length ? ' request headers Safari refuses: ' + Object.keys(refusedHeaders).join(', ') + '.' : '') +
             (result.droppedRules.length ? ' ' + JSON.stringify(summarize(result)) : ''));
         }
         return result;
@@ -786,10 +845,52 @@
     }
   });
 
+  // First-time setup. Chrome sends runtime.onInstalled with reason "install"
+  // exactly once. WebKit sends it whenever the extension is (re-)enabled while
+  // the browser runs, and not at all when the extension is first loaded during
+  // browser start-up, which left the list of enabled sites empty for good.
+  // setDefaults (setDefaultOptions of background.js) therefore runs once per
+  // profile: on the first call here, unless sites are already stored.
+  var FIRST_RUN_KEY = 'bpc_safari_first_run';
+  var firstRunPromise = null;
+  function firstRun(setDefaults) {
+    if (!firstRunPromise) {
+      firstRunPromise = Promise.resolve().then(function () {
+        return api.storage.local.get(['sites', FIRST_RUN_KEY]);
+      }).then(function (items) {
+        if (items[FIRST_RUN_KEY]) return false;
+        var flag = {};
+        flag[FIRST_RUN_KEY] = new Date().toISOString();
+        return Promise.resolve(api.storage.local.set(flag)).then(function () {
+          if (items.sites && Object.keys(items.sites).length) return false; // set up by an earlier build
+          setDefaults();
+          report.firstRun = flag[FIRST_RUN_KEY];
+          return true;
+        });
+      }).catch(function (e) {
+        recordError('first run failed: ' + (e && e.message || e));
+        return false;
+      });
+    }
+    return firstRunPromise;
+  }
+
+  // background.js asks for the options page from several places during the
+  // first start; open it once.
+  var lastOptionsPage = 0;
+  function openOptionsPage() {
+    var now = Date.now();
+    if (now - lastOptionsPage < 5000) return Promise.resolve();
+    lastOptionsPage = now;
+    return Promise.resolve(api.runtime.openOptionsPage()).catch(function () {});
+  }
+
   var bpcSafari = {
     getSelf: getSelf,
     updateSessionRules: updateSessionRules,
     offscreenParse: offscreenParse,
+    firstRun: firstRun,
+    openOptionsPage: openOptionsPage,
     report: report,
     // exposed for tests
     _diagnostics: diagnostics,

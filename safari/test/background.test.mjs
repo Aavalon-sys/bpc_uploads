@@ -11,7 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from '../build.mjs';
 import { runBackground } from './harness.mjs';
-import { safariRuleProblems } from './webkit-rules.mjs';
+import { ACCEPTED_HEADER_NAMES, safariRuleProblems } from './webkit-rules.mjs';
 import { findMismatch } from './sampler.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -30,6 +30,16 @@ const buildResult = build({ out: safariDir });
 const EXTRA_ID_BASE = 10000000;
 const baseId = (id) => (id >= EXTRA_ID_BASE ? Math.floor((id - EXTRA_ID_BASE) / 64) : id);
 const responseHeadersOnly = (rule) => rule.action.type === 'modifyHeaders' && rule.action.responseHeaders && !(rule.action.requestHeaders || []).length;
+// Request headers Safari refuses (X-Forwarded-For and the sites' own app headers).
+const refused = (h) => !ACCEPTED_HEADER_NAMES.has(String(h.header).toLowerCase());
+const acceptedRequestHeaders = (rule) => (rule.action.requestHeaders || []).filter((h) => !refused(h));
+// Rules Safari cannot express at all: nothing but response headers or refused request headers.
+const inexpressible = (rule) => rule.action.type === 'modifyHeaders' && !acceptedRequestHeaders(rule).length;
+// The refused headers the extension's rules use: X-Forwarded-For (Googlebot and
+// random-IP rules) and the app headers of two sites.
+const REFUSED_HEADERS = ['app-identifier', 'device-type', 'ismobileapp', 'platform', 'renderingkind', 'x-access-token', 'x-forwarded-for'];
+// Every rejected update must be about a refused header name, nothing else.
+const onlyHeaderRefusals = (dnrErrors) => dnrErrors.flat().every((p) => /The header `[^`]+` is not recognized/.test(p));
 
 let chromeRun;
 test('Chrome release: baseline rules in a Chrome-like browser', async () => {
@@ -68,7 +78,10 @@ test('Safari build: the patched background uses the compat layer', () => {
   assert.ok(!manifest.permissions.includes('offscreen'));
   assert.equal(manifest.incognito, undefined);
   assert.match(fs.readFileSync(path.join(safariDir, 'lib', 'purify.min.js'), 'utf8'), /DOMPurify \d/);
-  assert.equal(buildResult.info.patches.length, 5);
+  assert.equal(buildResult.info.patches.length, 7);
+  assert.match(bg, /if \(details\.reason == "install"\) \{\r?\n\s*bpcSafari\.firstRun\(setDefaultOptions\);\r?\n\s*\} else if \(details\.reason == "update"\)/, 'install handler not patched');
+  assert.ok(!bg.includes('ext_api.runtime.openOptionsPage()'));
+  assert.match(bg, /setTimeout\(function \(\) \{\n  bpcSafari\.firstRun\(setDefaultOptions\);\n\}, 1500\);\n$/);
   assert.ok(manifest.permissions.includes('declarativeNetRequest'));
   assert.ok(fs.readFileSync(path.join(safariDir, 'lib', 'empty.js'), 'utf8').trim().length > 0);
   const popup = fs.readFileSync(path.join(safariDir, 'options', 'popup.html'), 'utf8');
@@ -84,12 +97,17 @@ for (const version of [[16, 4], [17, 0], [18, 4], [26, 0]]) {
     const run = await runBackground({ extDir: safariDir, flavor: 'safari', safariVersion: version });
     assert.equal(run.loadError, null);
     assert.deepEqual(run.errors.map(String), []);
-    assert.deepEqual(run.dnrErrors, [], 'Safari rejected an update');
+    // Safari rejects the first attempts because of request headers it does not
+    // accept; each such header is removed and the update retried.
+    assert.equal(run.dnrErrors.length, REFUSED_HEADERS.length, 'one rejected update per refused header');
+    assert.ok(onlyHeaderRefusals(run.dnrErrors), JSON.stringify(run.dnrErrors.map((e) => e[0])));
 
     const report = run.sandbox.bpcSafari.report;
     const addCall = report.lastAddCall;
     assert.ok(addCall && addCall.rulesIn === chromeRun.sessionRules.length, 'compat layer did not see the full rule set');
-    assert.equal(addCall.batchRejected, false);
+    assert.match(String(addCall.batchRejected), /The header `[^`]+` is not recognized/);
+    assert.deepEqual(Object.keys(addCall.strippedHeaders).sort(), REFUSED_HEADERS);
+    assert.ok(addCall.strippedHeaders['x-forwarded-for'] > 40, 'the Googlebot rules carry X-Forwarded-For');
     for (const rule of run.sessionRules) {
       assert.deepEqual(safariRuleProblems(rule, version), [], JSON.stringify(rule).slice(0, 300));
       const keys = Object.keys(rule.condition);
@@ -97,7 +115,8 @@ for (const version of [[16, 4], [17, 0], [18, 4], [26, 0]]) {
         assert.ok(!keys.includes('initiatorDomains') && !keys.includes('excludedInitiatorDomains'));
     }
 
-    // Every Chrome rule is present, except response-header rules Safari cannot express.
+    // Every Chrome rule is present, except the ones Safari cannot express:
+    // rules that only set response headers or only headers Safari refuses.
     const chromeRules = new Map(chromeRun.sessionRules.map((r) => [r.id, r]));
     const byBase = new Map();
     for (const rule of run.sessionRules) {
@@ -107,10 +126,16 @@ for (const version of [[16, 4], [17, 0], [18, 4], [26, 0]]) {
       byBase.get(id).push(rule);
     }
     const missing = [...chromeRules.values()].filter((r) => !byBase.has(r.id));
-    assert.deepEqual(missing.filter((r) => !responseHeadersOnly(r)).map((r) => r.id), []);
+    assert.deepEqual(missing.filter((r) => !inexpressible(r)).map((r) => r.id), []);
+    assert.deepEqual([...chromeRules.values()].filter((r) => inexpressible(r) && byBase.has(r.id)).map((r) => r.id), []);
     const dropped = [...addCall.droppedRules]; // copy out of the VM realm
     assert.deepEqual(dropped.map((d) => d.id).sort((a, b) => a - b), missing.map((r) => r.id).sort((a, b) => a - b));
-    assert.ok(dropped.every((d) => /responseHeaders/.test(d.reason)), JSON.stringify(dropped.map((d) => d.reason)));
+    assert.ok(dropped.every((d) => /responseHeaders|only modifies request headers Safari refuses/.test(d.reason)), JSON.stringify(dropped.map((d) => d.reason)));
+    // The Googlebot identity survives without the refused X-Forwarded-For header.
+    const googlebot = run.sessionRules.filter((r) => (r.action.requestHeaders || []).some((h) => /Googlebot/.test(h.value || '')));
+    assert.ok(googlebot.length > 30, `${googlebot.length} Googlebot rules`);
+    for (const r of googlebot)
+      assert.deepEqual(r.action.requestHeaders.map((h) => h.header).filter((h) => h !== 'Cookie'), ['User-Agent', 'Referer'], `headers of rule ${r.id}`);
     assert.equal(addCall.rulesOut, run.sessionRules.length);
 
     // Same matching behaviour: rewritten regexes accept exactly the same URLs.
@@ -123,8 +148,13 @@ for (const version of [[16, 4], [17, 0], [18, 4], [26, 0]]) {
         if (c.excludedDomains) { c.excludedInitiatorDomains = c.excludedDomains; delete c.excludedDomains; }
         return c;
       };
-      // X-Forwarded-For carries a random IP address chosen at each start.
-      const action = (r) => JSON.parse(JSON.stringify(r.action).replace(/("header":"X-Forwarded-For","operation":"set","value":")[^"]*"/g, '$1<ip>"'));
+      // Same action, apart from the request headers Safari refuses.
+      const action = (r) => {
+        const a = structuredClone(r.action);
+        delete a.responseHeaders;
+        if (a.requestHeaders) a.requestHeaders = a.requestHeaders.filter((h) => !refused(h));
+        return a;
+      };
       for (const r of rules) {
         assert.deepEqual(strip(r), strip(orig), `condition of rule ${r.id}`);
         assert.deepEqual(action(r), action(orig), `action of rule ${r.id}`);
@@ -143,6 +173,8 @@ test('Safari build: changing the enabled sites leaves no stale rewritten rules',
   const chrome = await runBackground({ extDir: chromeDir, flavor: 'chrome' });
   const before = run.currentRules();
   const allSites = structuredClone(run.store.sites);
+  const rejectedAtStart = run.dnrErrors.length;
+  assert.ok(onlyHeaderRefusals(run.dnrErrors));
   assert.ok(before.some((r) => r.id >= EXTRA_ID_BASE), 'expected some rewritten rules');
 
   // Keep a handful of sites, including ones whose regexes get rewritten.
@@ -158,16 +190,17 @@ test('Safari build: changing the enabled sites leaves no stale rewritten rules',
   for (const r of after) if (r.id >= EXTRA_ID_BASE) assert.ok(ids.has(baseId(r.id)), `orphan rewritten rule ${r.id}`);
   assert.ok(after.length < before.length / 4, `${after.length} rules left of ${before.length}`);
 
-  const chromeIds = new Set(chrome.currentRules().filter((r) => !responseHeadersOnly(r)).map((r) => r.id));
+  const chromeIds = new Set(chrome.currentRules().filter((r) => !inexpressible(r)).map((r) => r.id));
   const safariBase = new Set(after.map((r) => baseId(r.id)));
   assert.deepEqual([...safariBase].sort((a, b) => a - b), [...chromeIds].sort((a, b) => a - b));
-  assert.deepEqual(run.dnrErrors, []);
+  // Refused headers are remembered: later updates are not rejected again.
+  assert.equal(run.dnrErrors.length, rejectedAtStart, 'an update after start-up was rejected');
 
   // And back to everything: same as a fresh install.
   run.api.storage.local.set({ sites: allSites });
   await run.settle(800);
   assert.equal(run.currentRules().length, before.length);
-  assert.deepEqual(run.dnrErrors, []);
+  assert.equal(run.dnrErrors.length, rejectedAtStart, 'an update after start-up was rejected');
 });
 
 test('offscreenParse strips scripts and extracts the selected element', async () => {
@@ -208,7 +241,7 @@ for (const errorStyle of ['plain', 'webkit']) test(`Safari build: rules Safari r
   if (errorStyle === 'webkit') {
     // One cheap retry per refused rule instead of bisecting the batch.
     const adds = run.dnrCalls.filter((c) => (c.addRules || []).length).length;
-    assert.ok(adds <= expectedRefused.length + 2, `${adds} add calls for ${expectedRefused.length} refused rules`);
+    assert.ok(adds <= expectedRefused.length + REFUSED_HEADERS.length + 2, `${adds} add calls for ${expectedRefused.length} refused rules`);
   }
 });
 
@@ -269,4 +302,31 @@ test('Safari build: the diagnostics message reports the background state', async
   for (const listener of run.api.runtime.onMessage.listeners)
     listener({ request: 'something_else' }, {}, (r) => other.push(r));
   assert.deepEqual(other, []);
+});
+
+// --- First-time setup ------------------------------------------------------
+
+test('Safari build: the default sites are enabled even when Safari sends no install event', async () => {
+  // WebKit sends no runtime.onInstalled when the extension is first loaded
+  // during browser start-up; the Chrome code then leaves every site disabled.
+  const run = await runBackground({ extDir: safariDir, flavor: 'safari', safariVersion: [18, 4], fireInstalled: false, settleMs: 3500 });
+  assert.deepEqual(run.errors.map(String), []);
+  assert.ok(Object.keys(run.store.sites || {}).length > 500, 'default sites were not stored');
+  assert.ok([...run.sandbox.enabledSites].length > 500, 'no sites enabled');
+  assert.ok(run.sessionRules.length > 700, `${run.sessionRules.length} rules`);
+  assert.ok(run.store.bpc_safari_first_run, 'first run not recorded');
+  assert.equal(run.optionsOpened, 1, 'the options page should open once');
+});
+
+test('Safari build: a repeated install event does not reset the chosen sites', async () => {
+  // WebKit sends the install event again whenever the extension is re-enabled.
+  const run = await runBackground({ extDir: safariDir, flavor: 'safari', safariVersion: [18, 4] });
+  assert.equal(run.optionsOpened, 1, 'the options page should open once on first install');
+  const chosen = Object.fromEntries(Object.entries(run.store.sites).slice(0, 5));
+  run.api.storage.local.set({ sites: chosen });
+  await run.settle(800);
+  for (const listener of run.api.runtime.onInstalled.listeners) listener({ reason: 'install' });
+  await run.settle(2500);
+  assert.deepEqual(Object.keys(run.store.sites).sort(), Object.keys(chosen).sort());
+  assert.equal(run.optionsOpened, 1);
 });

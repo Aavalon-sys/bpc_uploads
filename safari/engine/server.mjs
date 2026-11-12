@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 // Local stand-in for a few supported news sites, used by the WebKit engine
-// test (safari/engine/run.sh). The test maps the host names below to
-// 127.0.0.1, so nothing here ever talks to the real sites.
+// test (safari/engine/run.sh).
 //
 //   node server.mjs --cert cert.pem --key key.pem --log requests.jsonl
-//                   [--https-port 443] [--http-port 80]
+//                   [--https-port 18443] [--proxy-port 18080]
+//
+// The proxy port is an HTTP proxy that the test's web views are configured to
+// use: it answers every request itself and tunnels every CONNECT to the local
+// HTTPS server, whatever the host name. The real sites are never contacted
+// and no DNS or /etc/hosts change is needed.
 //
 // Every request is appended to the log as one JSON line, which is how the
 // test sees the headers WebKit really sent and which scripts were fetched.
@@ -12,6 +16,7 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
+import net from 'node:net';
 
 // What each test page contains. `blocked` scripts match a block rule of the
 // extension for that site and must never be requested; `ok` is a control.
@@ -103,17 +108,35 @@ function handler(scheme, logFile) {
 }
 
 function main() {
-  const args = { 'https-port': '443', 'http-port': '80' };
+  const args = { 'https-port': '18443', 'proxy-port': '18080' };
   for (let i = 2; i < process.argv.length; i += 2) args[process.argv[i].replace(/^--/, '')] = process.argv[i + 1];
   if (!args.cert || !args.key || !args.log) {
-    console.error('usage: server.mjs --cert cert.pem --key key.pem --log requests.jsonl [--https-port 443] [--http-port 80]');
+    console.error('usage: server.mjs --cert cert.pem --key key.pem --log requests.jsonl [--https-port 18443] [--proxy-port 18080]');
     process.exit(2);
   }
+  const httpsPort = Number(args['https-port']);
   fs.writeFileSync(args.log, '');
   https.createServer({ cert: fs.readFileSync(args.cert), key: fs.readFileSync(args.key) }, handler('https', args.log))
-    .listen(Number(args['https-port']), () => console.log(`https on ${args['https-port']}`));
-  http.createServer(handler('http', args.log))
-    .listen(Number(args['http-port']), () => console.log(`http on ${args['http-port']}`));
+    .listen(httpsPort, '127.0.0.1', () => console.log(`https on ${httpsPort}`));
+
+  // Plain requests sent to the proxy are answered directly; CONNECT is
+  // tunnelled to the HTTPS server above regardless of the requested host.
+  const proxy = http.createServer(handler('http', args.log));
+  proxy.on('connect', (req, client, head) => {
+    const upstream = net.connect(httpsPort, '127.0.0.1', () => {
+      client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head && head.length) upstream.write(head);
+      upstream.pipe(client);
+      client.pipe(upstream);
+    });
+    const close = () => {
+      upstream.destroy();
+      client.destroy();
+    };
+    upstream.on('error', close);
+    client.on('error', close);
+  });
+  proxy.listen(Number(args['proxy-port']), '127.0.0.1', () => console.log(`proxy on ${args['proxy-port']}`));
 }
 
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop()))

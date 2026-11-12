@@ -36,6 +36,7 @@ export async function runBackground({
   settleMs = 1500,
   extraRuleCheck = null, // (rule) => problem string or null, to simulate other Safari refusals
   errorStyle = 'plain', // 'webkit': "Rule with id N is invalid. ..." like Safari reports it
+  fireInstalled = true, // false: like an extension first loaded while Safari starts (no install event)
 } = {}) {
   const manifest = JSON.parse(fs.readFileSync(path.join(extDir, 'manifest.json'), 'utf8'));
   const store = {};
@@ -284,7 +285,7 @@ export async function runBackground({
   }
 
   // Simulate a fresh install: the browser fires runtime.onInstalled.
-  if (!loadError) {
+  if (!loadError && fireInstalled) {
     later(() => {
       for (const l of runtime.onInstalled.listeners) {
         try { l({ reason: 'install' }); } catch (e) { errors.push(e); }

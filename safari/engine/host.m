@@ -6,6 +6,7 @@
 //
 //   bpc-webkit-host --extension <dir> --out <result.json>
 //                   [--load-delay <seconds>] [--grant all|none] [--settle <seconds>]
+//                   [--proxy <host:port>] [--safari-version <x.y>] [--private]
 //                   [--url <url>]...
 //
 // --load-delay  Seconds between creating the extension controller and loading
@@ -14,10 +15,17 @@
 //               and a later load as "the user just enabled it".
 // --grant       all: every website is allowed (like "Always Allow on Every
 //               Website"); none: no website access is granted.
+// --proxy       HTTP proxy for the tabs (the local test server), so that the
+//               test pages never reach the real sites.
+// --safari-version  Makes the user agent look like that Safari version (a
+//               plain WKWebView has no "Version/x.y Safari" part).
+// --private     Use a non-persistent data store for the tabs, which WebKit
+//               treats as Private Browsing.
 //
 // Build: see safari/engine/run.sh
 
 #import <Cocoa/Cocoa.h>
+#import <Network/Network.h>
 #import <WebKit/WebKit.h>
 
 // Optional private property, only used when this WebKit has it.
@@ -140,6 +148,8 @@ static id callJSON(WKWebView *webView, NSString *body, WKContentWorld *world, NS
 @property (nonatomic, strong) BPCWindow *window;
 @property (nonatomic, strong) NSWindow *nativeWindow;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *events;
+@property (nonatomic, copy) NSString *userAgentSuffix;
+@property (nonatomic, strong) WKUserContentController *userContentController;
 - (BPCTab *)openTabActive:(BOOL)active;
 - (WKWebView *)makeWebViewForExtensionPage:(BOOL)extensionPage;
 - (void)note:(NSString *)type detail:(id)detail;
@@ -302,8 +312,13 @@ static id callJSON(WKWebView *webView, NSString *body, WKContentWorld *world, NS
     if (!configuration)
         configuration = [[WKWebViewConfiguration alloc] init];
     configuration.webExtensionController = _controller;
-    if (!extensionPage)
+    if (_userAgentSuffix)
+        configuration.applicationNameForUserAgent = _userAgentSuffix;
+    if (!extensionPage) {
         configuration.websiteDataStore = _dataStore;
+        // One user content controller for all tabs, as a browser has per profile.
+        configuration.userContentController = _userContentController;
+    }
     return [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 1200, 800) configuration:configuration];
 }
 
@@ -416,6 +431,25 @@ static NSString * const kBackgroundProbe = @""
     "  out.permissions = perms.permissions; out.origins = perms.origins.length; out.originsSample = perms.origins.slice(0, 3);"
     "  const tabs = await api.tabs.query({});"
     "  out.tabs = tabs.map(t => ({ id: t.id, url: t.url, status: t.status, active: t.active }));"
+    "  if (!globalThis.__bpcSpy && typeof ext_api !== 'undefined') {"
+    "    globalThis.__bpcSpy = [];"
+    "    const real = ext_api;"
+    "    const wrap = (ns, name, fn) => function (...args) {"
+    "      const rec = { api: name };"
+    "      try { rec.args = JSON.parse(JSON.stringify(args, (k, v) => typeof v === 'function' ? '[function]' : v)); } catch (e) { rec.args = String(e); }"
+    "      if (globalThis.__bpcSpy.length < 60) globalThis.__bpcSpy.push(rec);"
+    "      let ret;"
+    "      try { ret = fn.apply(ns, args); } catch (e) { rec.threw = String(e && e.message || e); throw e; }"
+    "      if (ret && typeof ret.then === 'function') ret.then(v => { try { rec.resolved = (JSON.stringify(v) || 'undefined').slice(0, 500); } catch (e) { rec.resolved = '[unserialisable]'; } }, e => { rec.rejected = String(e && e.message || e); });"
+    "      else rec.returned = typeof ret;"
+    "      return ret;"
+    "    };"
+    "    const spyOn = (ns, names) => new Proxy(ns, { get(t, k) { const v = t[k]; if (names.includes(k) && typeof v === 'function') return wrap(t, k, v); return typeof v === 'function' ? v.bind(t) : v; } });"
+    "    const scripting = spyOn(real.scripting, ['executeScript']);"
+    "    const tabsSpy = spyOn(real.tabs, ['sendMessage']);"
+    "    ext_api = new Proxy(real, { get(t, k) { if (k === 'scripting') return scripting; if (k === 'tabs') return tabsSpy; return t[k]; } });"
+    "    out.spy = 'installed';"
+    "  } else out.spy = globalThis.__bpcSpy || null;"
     "  if (!globalThis.__bpcHostEvents) {"
     "    globalThis.__bpcHostEvents = [];"
     "    api.tabs.onUpdated.addListener((tabId, changeInfo, tab) => { if (globalThis.__bpcHostEvents.length < 80) globalThis.__bpcHostEvents.push({ tabId, changeInfo, url: tab && tab.url, status: tab && tab.status }); });"
@@ -438,9 +472,11 @@ static NSString * const kContentWorldProbe = @""
     "out.hasChrome = typeof chrome === 'object'; out.hasBrowser = typeof browser === 'object';"
     "out.contentScript = typeof ext_chromium !== 'undefined';"
     "out.extChromium = typeof ext_chromium !== 'undefined' ? ext_chromium : null;"
-    "out.csLocal = typeof func_post !== 'undefined';"
-    "out.matchDomain = typeof matchDomain === 'function';"
+    "out.csLocal = typeof cs_default === 'function';"
+    "out.gotBg2cs = typeof msg_once === 'undefined' ? null : !!msg_once;"
+    "out.csDone = typeof csDone === 'undefined' ? null : !!csDone;"
     "out.dompurify = typeof DOMPurify !== 'undefined';"
+    "out.styles = [...document.querySelectorAll('head > style[id]')].map(s => s.id);"
     "return JSON.stringify(out);";
 
 int main(int argc, const char *argv[])
@@ -453,6 +489,9 @@ int main(int argc, const char *argv[])
         NSString *grant = @"all";
         NSTimeInterval loadDelay = 6;
         NSTimeInterval settle = 5;
+        NSString *proxy = nil;
+        NSString *safariVersion = nil;
+        BOOL privateBrowsing = NO;
         NSMutableArray<NSString *> *urls = [NSMutableArray array];
         for (int i = 1; i < argc; i++) {
             NSString *arg = @(argv[i]);
@@ -462,11 +501,14 @@ int main(int argc, const char *argv[])
             else if ([arg isEqualToString:@"--grant"]) { grant = value; i++; }
             else if ([arg isEqualToString:@"--load-delay"]) { loadDelay = value.doubleValue; i++; }
             else if ([arg isEqualToString:@"--settle"]) { settle = value.doubleValue; i++; }
+            else if ([arg isEqualToString:@"--proxy"]) { proxy = value; i++; }
+            else if ([arg isEqualToString:@"--safari-version"]) { safariVersion = value; i++; }
+            else if ([arg isEqualToString:@"--private"]) { privateBrowsing = YES; }
             else if ([arg isEqualToString:@"--url"]) { [urls addObject:value]; i++; }
             else { fprintf(stderr, "unknown argument %s\n", argv[i]); return 2; }
         }
         if (!extensionPath || !outPath) {
-            fprintf(stderr, "usage: bpc-webkit-host --extension <dir> --out <file> [--load-delay s] [--grant all|none] [--settle s] [--url u]...\n");
+            fprintf(stderr, "usage: bpc-webkit-host --extension <dir> --out <file> [--load-delay s] [--grant all|none] [--settle s] [--proxy host:port] [--safari-version x.y] [--private] [--url u]...\n");
             return 2;
         }
 
@@ -474,7 +516,7 @@ int main(int argc, const char *argv[])
         NSOperatingSystemVersion os = NSProcessInfo.processInfo.operatingSystemVersion;
         result[@"os"] = [NSString stringWithFormat:@"macOS %ld.%ld.%ld", (long)os.majorVersion, (long)os.minorVersion, (long)os.patchVersion];
         result[@"webkit"] = [NSBundle bundleForClass:WKWebView.class].infoDictionary[@"CFBundleVersion"] ?: @"?";
-        result[@"options"] = @{ @"grant": grant, @"loadDelay": @(loadDelay), @"settle": @(settle) };
+        result[@"options"] = @{ @"grant": grant, @"loadDelay": @(loadDelay), @"settle": @(settle), @"proxy": proxy ?: @"", @"safariVersion": safariVersion ?: @"", @"private": @(privateBrowsing) };
 
         void (^finish)(void) = ^{
             NSData *data = [NSJSONSerialization dataWithJSONObject:jsonSafe(result) options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
@@ -514,10 +556,26 @@ int main(int argc, const char *argv[])
         // 2. Controller, context and a window with one tab.
         BPCHost *host = [[BPCHost alloc] init];
         host.events = [NSMutableArray array];
-        host.dataStore = [WKWebsiteDataStore nonPersistentDataStore];
+        host.userContentController = [[WKUserContentController alloc] init];
+        // A persistent store of its own: WebKit treats tabs with a non-persistent
+        // store as Private Browsing, where extensions are off unless allowed.
+        host.dataStore = privateBrowsing ? [WKWebsiteDataStore nonPersistentDataStore] : [WKWebsiteDataStore dataStoreForIdentifier:[NSUUID UUID]];
+        if (proxy) {
+            NSArray<NSString *> *parts = [proxy componentsSeparatedByString:@":"];
+            nw_endpoint_t endpoint = nw_endpoint_create_host(parts.firstObject.UTF8String, parts.lastObject.UTF8String);
+            host.dataStore.proxyConfigurations = @[ nw_proxy_config_create_http_connect(endpoint, NULL) ];
+        }
+        if (safariVersion)
+            host.userAgentSuffix = [NSString stringWithFormat:@"Version/%@ Safari/605.1.15", safariVersion];
 
         WKWebExtensionControllerConfiguration *configuration = [WKWebExtensionControllerConfiguration nonPersistentConfiguration];
         configuration.defaultWebsiteDataStore = host.dataStore;
+        if (host.userAgentSuffix) {
+            // Also for the extension's own pages, including its background page.
+            WKWebViewConfiguration *base = [[WKWebViewConfiguration alloc] init];
+            base.applicationNameForUserAgent = host.userAgentSuffix;
+            configuration.webViewConfiguration = base;
+        }
         host.controller = [[WKWebExtensionController alloc] initWithConfiguration:configuration];
         host.controller.delegate = host;
         NSDate *controllerCreated = [NSDate date];
