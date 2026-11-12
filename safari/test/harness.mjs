@@ -5,10 +5,10 @@
 // flavor 'chrome': Chrome-like API (management + offscreen present, the
 //                  background is a service worker that calls importScripts).
 // flavor 'safari': Safari-like API (no management, no offscreen, background
-//                  scripts listed in manifest.background.scripts) with a DNR
-//                  mock that rejects a whole update when one rule is invalid,
-//                  using the approximate WebKit rule/regex checks in
-//                  webkit-rules.mjs.
+//                  scripts listed in manifest.background.scripts and read as
+//                  Windows-1252) with a DNR mock that rejects a whole update when
+//                  one rule is invalid, using the approximate WebKit
+//                  rule/regex checks in webkit-rules.mjs.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -17,6 +17,17 @@ import { safariRuleProblems, uncompilable, webkitRegexProblem } from './webkit-r
 
 // The rule the Safari build adds to every update to verify it took effect.
 const MARKER_ID = 9000000;
+
+// Released Safari versions read the scripts of the background page as
+// Windows-1252 ("Latin-1"): the page WebKit generates for them declares no
+// character set. garble() shows a UTF-8 text the way such a reader sees it.
+const CP1252 = '\u20ac\u0081\u201a\u0192\u201e\u2026\u2020\u2021\u02c6\u2030\u0160\u2039\u0152\u008d\u017d\u008f\u0090\u2018\u2019\u201c\u201d\u2022\u2013\u2014\u02dc\u2122\u0161\u203a\u0153\u009d\u017e\u0178';
+export function readAsWindows1252(bytes) {
+  let text = '';
+  for (const b of bytes) text += b >= 0x80 && b <= 0x9f ? CP1252[b - 0x80] : String.fromCharCode(b);
+  return text;
+}
+export const garble = (text) => readAsWindows1252(Buffer.from(text, 'utf8'));
 
 function makeEvent() {
   const listeners = [];
@@ -282,7 +293,8 @@ export async function runBackground({
 
   const runFile = (rel) => {
     const file = path.join(extDir, rel.replace(/^\//, ''));
-    vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: file });
+    const code = flavor === 'safari' ? readAsWindows1252(fs.readFileSync(file)) : fs.readFileSync(file, 'utf8');
+    vm.runInContext(code, sandbox, { filename: file });
   };
   if (flavor === 'chrome') sandbox.importScripts = (...files) => files.forEach(runFile);
 

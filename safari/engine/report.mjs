@@ -43,6 +43,8 @@ function readRequests(file) {
 }
 
 const failures = [];
+// Sites stored per scenario: the same list whichever way the extension was first started.
+const storedSites = {};
 const check = (scenario, ok, message) => {
   console.log(`   ${ok ? 'ok  ' : 'FAIL'} ${message}`);
   if (!ok) failures.push(`${scenario}: ${message}`);
@@ -158,6 +160,13 @@ function scenario(name, expect, { optional = false } = {}) {
     // One more than the extension's own count: the marker rule that verifies each update.
     check(name, believed !== null && bg.sessionRules === believed + 1, `the rules the extension believes it installed are really there (${believed} + marker vs ${bg.sessionRules})`);
     check(name, !(bg.compat && bg.compat.errors && bg.compat.errors.length), `no uncaught errors in the background page`);
+    // Safari reads the background scripts as Windows-1252: "Télérama.fr" used to
+    // arrive as "TÃ©lÃ©rama.fr", and the options page then dropped such sites.
+    const names = bg.storedSiteNames || [];
+    const accented = names.filter((n) => /[^\x00-\x7f]/.test(n.toLowerCase().replace(/\s\(.*\)/, '')));
+    const garbled = names.filter((n) => /Ã[^\x00-\x7f]/.test(n));
+    check(name, accented.length >= 30 && !garbled.length, `site names with accented letters are stored intact (${accented.length} stored, ${garbled.length} garbled${garbled.length ? ': ' + garbled.slice(0, 3).join(', ') : ''})`);
+    storedSites[name] = bg.storedSites;
   }
 }
 
@@ -169,6 +178,10 @@ scenario('private', 'untouched');
 // With the WebKit that ships inside a newer Safari, when the machine has one.
 scenario('staged-enabled', 'working', { optional: true });
 scenario('staged-launch', 'working', { optional: true });
+
+console.log('\n=== All scenarios ===');
+const counts = [...new Set(Object.values(storedSites))];
+check('all', counts.length === 1, `every scenario stored the same number of sites (${JSON.stringify(storedSites)})`);
 
 console.log(`\n=== ${failures.length ? failures.length + ' check(s) failed' : 'all checks passed'} ===`);
 for (const f of failures) console.log(`  - ${f}`);

@@ -36,6 +36,9 @@
  *    Safari starts, so the default sites were never enabled there:
  *    bpcSafari.firstRun() does the first-time setup exactly once, with or
  *    without that event.
+ *  - Earlier Safari builds stored site names with accented letters garbled,
+ *    after which the options page disabled those sites:
+ *    bpcSafari.repairSiteNames() puts such a stored list right.
  */
 (function (root) {
   'use strict';
@@ -1024,6 +1027,108 @@
     return firstRunPromise;
   }
 
+  // Site lists stored by earlier Safari builds. Released Safari versions read
+  // the scripts of the background page as Latin-1, so those builds saw the
+  // site names with accented letters garbled and stored them that way. The
+  // options page reads the same names as UTF-8: it did not recognise the
+  // garbled ones and, as it saves the list whenever it is opened, stored the
+  // list without those sites. The scripts are ASCII-only now (asciiJs in
+  // safari/build.mjs); this puts a stored list right, once per profile:
+  //  - a garbled name becomes the name sites.js has for the same domain,
+  //  - when every site the options page could not match is missing while
+  //    nearly all other default sites are enabled, those sites are enabled
+  //    again (a list the user cut down to a few sites is left alone),
+  //  - sites_default, the names known to the last version, gets the same fix.
+  var NAMES_KEY = 'bpc_safari_site_names';
+  var hasOwn = function (object, key) {
+    return !!object && Object.prototype.hasOwnProperty.call(object, key);
+  };
+  function hasNonAscii(text) {
+    return /[^\x00-\x7f]/.test(String(text));
+  }
+  // compareKey() of background.js and options.js: names match without their " (...)" part.
+  function plainName(name) {
+    return String(name).toLowerCase().replace(/\s\(.*\)/, '');
+  }
+  function repairSiteNames(defaults) {
+    return Promise.resolve().then(function () {
+      return api.storage.local.get([NAMES_KEY, 'sites', 'sites_default', 'sites_custom', 'sites_updated', 'sites_excluded']);
+    }).then(function (items) {
+      if (items[NAMES_KEY]) return null;
+      var result = { at: new Date().toISOString(), renamed: 0, restored: 0, known: 0 };
+      var changes = {};
+      var sites = items.sites && typeof items.sites === 'object' ? items.sites : {};
+      var excluded = Array.isArray(items.sites_excluded) ? items.sites_excluded : [];
+      // Names that do not come from sites.js are left alone.
+      var foreign = function (name) {
+        return hasOwn(items.sites_custom, name) || hasOwn(items.sites_updated, name);
+      };
+      var garbled = function (name) {
+        return hasNonAscii(name) && !hasOwn(defaults, name) && !foreign(name);
+      };
+      var accented = Object.keys(defaults || {}).filter(function (name) {
+        return hasNonAscii(name) && !foreign(name) && defaults[name] && typeof defaults[name].domain === 'string';
+      });
+
+      if (accented.length && Object.keys(sites).length) {
+        var byDomain = {};
+        accented.forEach(function (name) {
+          if (!hasOwn(byDomain, defaults[name].domain)) byDomain[defaults[name].domain] = name;
+        });
+        var fixed = {};
+        Object.keys(sites).forEach(function (key) {
+          var name = key;
+          if (garbled(key) && typeof sites[key] === 'string' && hasOwn(byDomain, sites[key]) && !hasOwn(sites, byDomain[sites[key]])) {
+            name = byDomain[sites[key]];
+            result.renamed++;
+          }
+          fixed[name] = sites[key];
+        });
+        // The sites setDefaultOptions() of background.js enables, in two parts:
+        // those the options page could not match, and the others.
+        var dropped = [];
+        var others = [];
+        Object.keys(defaults).forEach(function (name) {
+          var domain = defaults[name] && defaults[name].domain;
+          if (typeof domain !== 'string' || !domain || /^(###$|#options_(disable|optin)_)/.test(domain) || foreign(name)) return;
+          (hasNonAscii(plainName(name)) ? dropped : others).push(name);
+        });
+        var stored = {};
+        Object.keys(fixed).forEach(function (key) { stored[plainName(key)] = true; });
+        var isStored = function (name) {
+          return hasOwn(stored, plainName(name));
+        };
+        if (dropped.length && !dropped.some(isStored) && others.filter(isStored).length >= 0.9 * others.length) {
+          dropped.forEach(function (name) {
+            if (excluded.indexOf(defaults[name].domain) >= 0) return;
+            fixed[name] = defaults[name].domain;
+            result.restored++;
+          });
+        }
+        if (result.renamed || result.restored) changes.sites = fixed;
+      }
+
+      if (Array.isArray(items.sites_default) && items.sites_default.some(garbled)) {
+        var known = items.sites_default.filter(function (name) { return !garbled(name); });
+        accented.forEach(function (name) {
+          if (/^(#options_|###$)/.test(defaults[name].domain) || known.indexOf(name) >= 0) return;
+          known.push(name);
+          result.known++;
+        });
+        changes.sites_default = known;
+      }
+
+      changes[NAMES_KEY] = result;
+      return Promise.resolve(api.storage.local.set(changes)).then(function () {
+        report.siteNames = result;
+        return result;
+      });
+    }).catch(function (e) {
+      recordError('site name repair failed: ' + (e && e.message || e));
+      return null;
+    });
+  }
+
   // background.js asks for the options page from several places during the
   // first start; open it once.
   var lastOptionsPage = 0;
@@ -1039,6 +1144,7 @@
     updateSessionRules: updateSessionRules,
     offscreenParse: offscreenParse,
     firstRun: firstRun,
+    repairSiteNames: repairSiteNames,
     openOptionsPage: openOptionsPage,
     report: report,
     // exposed for tests

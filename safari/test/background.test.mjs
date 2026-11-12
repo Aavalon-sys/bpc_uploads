@@ -9,8 +9,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { build } from '../build.mjs';
-import { runBackground } from './harness.mjs';
+import vm from 'node:vm';
+import { asciiJs, build } from '../build.mjs';
+import { garble, readAsWindows1252, runBackground } from './harness.mjs';
 import { ACCEPTED_HEADER_NAMES, safariRuleProblems, uncompilable } from './webkit-rules.mjs';
 import { findMismatch } from './sampler.mjs';
 
@@ -87,7 +88,7 @@ test('Safari build: the patched background uses the compat layer', () => {
   assert.equal(buildResult.info.patches.length, 7);
   assert.match(bg, /if \(details\.reason == "install"\) \{\r?\n\s*bpcSafari\.firstRun\(setDefaultOptions\);\r?\n\s*\} else if \(details\.reason == "update"\)/, 'install handler not patched');
   assert.ok(!bg.includes('ext_api.runtime.openOptionsPage()'));
-  assert.match(bg, /setTimeout\(function \(\) \{\n  bpcSafari\.firstRun\(setDefaultOptions\);\n\}, 1500\);\n$/);
+  assert.match(bg, /setTimeout\(function \(\) \{\n  bpcSafari\.repairSiteNames\(defaultSites\)\.then\(function \(\) \{\n    bpcSafari\.firstRun\(setDefaultOptions\);\n  \}\);\n\}, 1500\);\n$/);
   assert.ok(manifest.permissions.includes('declarativeNetRequest'));
   assert.ok(fs.readFileSync(path.join(safariDir, 'lib', 'empty.js'), 'utf8').trim().length > 0);
   const popup = fs.readFileSync(path.join(safariDir, 'options', 'popup.html'), 'utf8');
@@ -395,4 +396,133 @@ test('Safari build: an unchanged rule set produces an identical update', async (
   assert.deepEqual(lastAdd(third).addRules, lastAdd(second).addRules);
   assert.equal(second.dnrErrors.length, 0);
   assert.equal(third.dnrErrors.length, 0);
+});
+
+// --- Character encoding ----------------------------------------------------
+// Released Safari versions read the scripts of the background page as
+// Windows-1252 (the harness does the same for the Safari flavor), which
+// garbled the site names with accented letters in sites.js. The Safari build
+// therefore writes every script without non-ASCII characters.
+
+const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]));
+const isAscii = (text) => !/[^\x00-\x7f]/.test(text);
+// compareKey() of the extension: names match without their " (...)" part.
+const plainName = (name) => name.toLowerCase().replace(/\s\(.*\)/, '');
+
+test('asciiJs keeps the meaning of strings and regular expressions', () => {
+  const samples = [
+    String.raw`'Télérama.fr' + "El Español"`,
+    // escaped character, character after an escaped backslash, and both
+    String.raw`["\é", "\\é", "\\\é", '\„\”', 'a\\\\é']`,
+    String.raw`'。•©' + ' é ' + '😀'.length + '\😀'`,
+    'var t = `À lire: ${1 + 1} \\é`; t',
+    String.raw`'Ärger. „Öl” ist da! Über 9.Zürich?Ja'.replace(/(?:^|[A-Za-z\"\“\”\)])(\.+|\?|!)(?=[A-ZÖÜ\„\”\d][A-Za-zÀ-ÿ\„\d]{1,})/gm, "$&|")`,
+    String.raw`'motÉcole “quoteÀ'.replace(/(([a-z]{2,}|[\"\“]))(?=[A-Z](?=[A-Za-zÀ-ÿ]+))/gm, "$&|")`,
+    String.raw`[/é+/.test('ééé'), /[^À-ÿ]/.test('é'), /é😀/u.test('é😀'), /[\é]/.test('é')].join() // “comment” é`,
+    String.raw`/* Ünïcödé comment */ ({ 'Kölner Stadt-Anzeiger': 1, "Ärzte Zeitung": 2 })`,
+  ];
+  for (const sample of samples) {
+    const ascii = asciiJs(sample);
+    assert.ok(isAscii(ascii), ascii);
+    assert.equal(JSON.stringify(vm.runInNewContext(ascii)), JSON.stringify(vm.runInNewContext(sample)), sample);
+  }
+  assert.equal(asciiJs(String.raw`'\é' + "\\é"`), "'\\u00e9' + \"\\\\\\u00e9\"");
+  assert.equal(asciiJs('plain ASCII \\n stays'), 'plain ASCII \\n stays');
+  assert.equal(asciiJs(String.fromCharCode(0xfeff) + 'var a;'), 'var a;', 'a byte order mark is dropped');
+});
+
+test('Safari build: every script is free of non-ASCII characters and still parses', () => {
+  const scripts = walk(safariDir).filter((f) => f.endsWith('.js'));
+  assert.ok(scripts.length > 15);
+  for (const file of scripts) {
+    const bytes = fs.readFileSync(file);
+    assert.ok(bytes.every((b) => b < 0x80), `${path.relative(safariDir, file)} has non-ASCII characters`);
+    assert.doesNotThrow(() => new vm.Script(bytes.toString('latin1'), { filename: file }));
+  }
+  assert.deepEqual(buildResult.info.nonAsciiScripts, []);
+  for (const f of ['sites.js', 'contentScript.js']) assert.ok(buildResult.info.asciiScripts.includes(f), f);
+  // Only the encoding changed: the scripts of the Chrome release that are not patched read the same.
+  for (const rel of ['sites.js', 'contentScript.js', 'cs_local/contentScript_en.js', 'cs_local/contentScript_fr.js']) {
+    const original = fs.readFileSync(path.join(chromeDir, rel), 'utf8');
+    assert.ok(!isAscii(original), `${rel} of the Chrome release is expected to have non-ASCII characters`);
+    assert.equal(fs.readFileSync(path.join(safariDir, rel), 'utf8'), asciiJs(original), rel);
+  }
+});
+
+// defaultSites as sites.js defines it, with the script read by the given function.
+function defaultSitesOf(dir, read) {
+  const sandbox = { chrome: { runtime: { getManifest: () => ({ key: 'x' }) } } };
+  vm.createContext(sandbox);
+  vm.runInContext(read(fs.readFileSync(path.join(dir, 'sites.js'))), sandbox);
+  // Regular expressions by their escaped source, so that both spellings compare equal.
+  return JSON.parse(JSON.stringify(sandbox.defaultSites, (key, value) => (Object.prototype.toString.call(value) === '[object RegExp]' ? `/${asciiJs(value.source)}/${value.flags}` : value)));
+}
+
+test('Safari build: sites.js read as Windows-1252 holds the sites of the Chrome release', () => {
+  const chromeSites = defaultSitesOf(chromeDir, (bytes) => bytes.toString('utf8'));
+  const safariSites = defaultSitesOf(safariDir, readAsWindows1252);
+  assert.deepEqual(Object.keys(safariSites), Object.keys(chromeSites));
+  assert.deepEqual(safariSites, chromeSites);
+  const accented = Object.keys(chromeSites).filter((name) => !isAscii(name));
+  assert.ok(accented.length >= 30, `${accented.length} accented site names`);
+  // What used to happen: the Chrome release's sites.js read the way Safari reads it.
+  const garbledSites = defaultSitesOf(chromeDir, readAsWindows1252);
+  assert.deepEqual(Object.keys(garbledSites).filter((name) => !isAscii(name)).sort(), accented.map(garble).sort());
+});
+
+test('Safari build: accented site names are stored intact, with and without the install event', async () => {
+  assert.ok(chromeRun, 'baseline test must run first');
+  const expected = Object.keys(chromeRun.store.sites).sort();
+  assert.ok(expected.filter((name) => !isAscii(name)).length >= 30);
+  for (const fireInstalled of [true, false]) {
+    const run = await runBackground({ extDir: safariDir, flavor: 'safari', safariVersion: [18, 4], fireInstalled, settleMs: 3500 });
+    assert.deepEqual(run.errors.map(String), []);
+    assert.deepEqual(Object.keys(run.store.sites).sort(), expected, `fireInstalled=${fireInstalled}`);
+    assert.deepEqual([...run.store.sites_default].sort(), [...chromeRun.store.sites_default].sort());
+    assert.deepEqual([...run.sandbox.enabledSites].sort(), [...chromeRun.sandbox.enabledSites].sort());
+    const repair = run.store.bpc_safari_site_names;
+    assert.ok(repair, 'the stored list was not checked');
+    assert.deepEqual([repair.renamed, repair.restored, repair.known], [0, 0, 0]);
+  }
+});
+
+test('Safari build: a site list stored by an earlier build is put right', async () => {
+  assert.ok(chromeRun, 'baseline test must run first');
+  const good = chromeRun.store;
+  const accented = Object.keys(good.sites).filter((name) => !isAscii(name));
+  const unmatched = accented.filter((name) => !isAscii(plainName(name)));
+  assert.ok(unmatched.length >= 30 && unmatched.length < accented.length, 'some accented names only differ inside "(...)"');
+  const earlier = {
+    // No install event: the background stored the names as it read them.
+    garbled: Object.fromEntries(Object.entries(good.sites).map(([name, domain]) => [garble(name), domain])),
+    // Install event: the options page opened and saved the list without the names it could not match.
+    dropped: Object.fromEntries(Object.entries(good.sites).filter(([name]) => !unmatched.includes(name))),
+  };
+  for (const [state, sites] of Object.entries(earlier)) {
+    const initialStore = {
+      sites,
+      sites_default: good.sites_default.map(garble),
+      ext_version_old: good.ext_version_old,
+      bpc_safari_first_run: '2026-01-01T00:00:00.000Z',
+    };
+    const run = await runBackground({ extDir: safariDir, flavor: 'safari', safariVersion: [18, 4], fireInstalled: false, settleMs: 4000, initialStore });
+    assert.deepEqual(run.errors.map(String), [], state);
+    assert.deepEqual(Object.keys(run.store.sites).sort(), Object.keys(good.sites).sort(), state);
+    assert.deepEqual({ ...run.store.sites }, { ...good.sites }, state);
+    assert.deepEqual([...run.store.sites_default].sort(), [...good.sites_default].sort(), state);
+    const repair = run.store.bpc_safari_site_names;
+    assert.deepEqual([repair.renamed, repair.restored], state === 'garbled' ? [accented.length, 0] : [0, unmatched.length], state);
+    // The background noticed the change and enabled the sites.
+    assert.deepEqual([...run.sandbox.enabledSites].sort(), [...chromeRun.sandbox.enabledSites].sort(), state);
+    assert.equal(run.optionsOpened, 0, 'no options page for a repair');
+  }
+});
+
+test('Safari build: a site list the user cut down keeps its sites', async () => {
+  assert.ok(chromeRun, 'baseline test must run first');
+  const chosen = Object.fromEntries(Object.entries(chromeRun.store.sites).filter(([name]) => isAscii(name)).slice(0, 40));
+  const initialStore = { sites: chosen, sites_default: [...chromeRun.store.sites_default], ext_version_old: chromeRun.store.ext_version_old, bpc_safari_first_run: '2026-01-01T00:00:00.000Z' };
+  const run = await runBackground({ extDir: safariDir, flavor: 'safari', safariVersion: [18, 4], fireInstalled: false, settleMs: 3500, initialStore });
+  assert.deepEqual(run.errors.map(String), []);
+  assert.deepEqual(Object.keys(run.store.sites).sort(), Object.keys(chosen).sort());
 });

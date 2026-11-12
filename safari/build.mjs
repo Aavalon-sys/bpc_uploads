@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..');
@@ -116,14 +117,72 @@ const BACKGROUND_PATCHES = [
   },
 ];
 
-// Appended to background.js: first-time setup when no install event arrives
+// Appended to background.js: puts right a site list stored by an earlier
+// Safari build, then does the first-time setup when no install event arrived
 // (the extension was first loaded while Safari was starting).
 const BACKGROUND_APPENDIX = `
-// Safari build: see bpcSafari.firstRun in safari-compat.js.
+// Safari build: see bpcSafari.repairSiteNames and bpcSafari.firstRun in safari-compat.js.
 setTimeout(function () {
-  bpcSafari.firstRun(setDefaultOptions);
+  bpcSafari.repairSiteNames(defaultSites).then(function () {
+    bpcSafari.firstRun(setDefaultOptions);
+  });
 }, 1500);
 `;
+
+// Released Safari versions read the scripts of the background page as Latin-1:
+// the page WebKit generates for "background.scripts" declares no character
+// set there. The site names with accented letters in sites.js arrived garbled
+// ("TÃ©lÃ©rama.fr"); the options page, which reads the same file as UTF-8,
+// then no longer recognised those sites and saved the list without them.
+// A script without non-ASCII characters reads the same in every encoding, so
+// the scripts of the Safari build spell such characters as \uXXXX escapes.
+// In this code base they only occur in string and regular expression literals
+// (and comments), where the escape means the same; the build checks that
+// every rewritten script still parses.
+export function asciiJs(source) {
+  return source.replace(/^\ufeff/, '').replace(/(\\*)([^\x00-\x7f])/gu, (match, slashes, ch) => {
+    let escaped = '';
+    for (let i = 0; i < ch.length; i++) escaped += '\\u' + ch.charCodeAt(i).toString(16).padStart(4, '0');
+    // An odd number of backslashes escapes the character itself: "\é" is "é".
+    return (slashes.length % 2 ? slashes.slice(1) : slashes) + escaped;
+  });
+}
+
+function parses(code) {
+  try {
+    new vm.Script(code);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Rewrites every script in dir that has non-ASCII characters (see asciiJs).
+// The background scripts must come out ASCII-only; any other script that
+// cannot be checked or rewritten safely is left as it is (Safari reads the
+// scripts it injects into pages as UTF-8) and reported.
+function asciiScripts(dir, required) {
+  const done = [];
+  const kept = [];
+  for (const file of walk(dir).filter((f) => f.endsWith('.js'))) {
+    const rel = path.relative(dir, file).split(path.sep).join('/');
+    const text = fs.readFileSync(file, 'utf8');
+    if (!/[^\x00-\x7f]/.test(text)) continue;
+    const ascii = asciiJs(text);
+    const isBackground = required.includes(rel);
+    const checkable = parses(text); // otherwise nothing can be said about the rewritten script
+    const sound = parses(ascii);
+    if (isBackground && checkable && !sound)
+      throw new Error(`${rel} has non-ASCII characters outside of string literals, which Safari's background page would misread; update safari/build.mjs`);
+    if (!isBackground && !(checkable && sound)) {
+      kept.push(rel);
+      continue;
+    }
+    fs.writeFileSync(file, ascii);
+    done.push(rel);
+  }
+  return { done, kept };
+}
 
 function transformManifest(manifest) {
   const m = structuredClone(manifest);
@@ -232,6 +291,7 @@ export function build(options = {}) {
       fs.copyFileSync(path.join(here, 'src', file), path.join(args.out, file));
     const safariManifest = transformManifest(manifest);
     fs.writeFileSync(path.join(args.out, 'manifest.json'), JSON.stringify(safariManifest, null, 2) + '\n');
+    const ascii = asciiScripts(args.out, safariManifest.background.scripts);
 
     const info = {
       name: manifest.name,
@@ -240,6 +300,8 @@ export function build(options = {}) {
       sourceSha256: fs.statSync(args.src).isFile() ? sha256(args.src) : null,
       domPurify: purify,
       patches: applied,
+      asciiScripts: ascii.done,
+      nonAsciiScripts: ascii.kept,
     };
     fs.writeFileSync(path.join(args.out, 'safari-build.json'), JSON.stringify(info, null, 2) + '\n');
 
@@ -266,6 +328,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.log(`Safari extension ${res.info.version} written to ${path.relative(process.cwd(), res.out) || '.'}`);
     for (const p of res.info.patches) console.log(`  patched (${p.matches}x): ${p.patch}`);
     console.log(`  DOMPurify: ${res.info.domPurify}`);
+    console.log(`  rewritten without non-ASCII characters: ${res.info.asciiScripts.join(', ') || 'none'}`);
+    if (res.info.nonAsciiScripts.length) console.log(`  left with non-ASCII characters: ${res.info.nonAsciiScripts.join(', ')}`);
     if (res.zip) console.log(`  zip: ${path.relative(process.cwd(), res.zip)}`);
   } catch (e) {
     console.error(`build failed: ${e.message}`);
