@@ -7,12 +7,14 @@ on:
     branches: [main]
     paths:
       - 'safari/**'
+      - '!safari/engine/**'
       - 'bypass-paywalls-chrome-clean-master.zip'
       - 'bypass-paywalls-firefox-clean-master.zip'
       - '.github/workflows/safari.yml'
   pull_request:
     paths:
       - 'safari/**'
+      - '!safari/engine/**'
       - 'bypass-paywalls-chrome-clean-master.zip'
       - 'bypass-paywalls-firefox-clean-master.zip'
       - '.github/workflows/safari.yml'

@@ -1,0 +1,65 @@
+name: Safari engine test
+
+# Runs the Safari build of the extension in WebKit's real web-extension engine
+# (the WKWebExtension API that Safari is built on) on a macOS runner and checks
+# what it actually does: request headers, blocked scripts, content scripts.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'safari/**'
+      - 'bypass-paywalls-chrome-clean-master.zip'
+      - 'bypass-paywalls-firefox-clean-master.zip'
+      - '.github/workflows/safari-engine.yml'
+  pull_request:
+    paths:
+      - 'safari/**'
+      - 'bypass-paywalls-chrome-clean-master.zip'
+      - 'bypass-paywalls-firefox-clean-master.zip'
+      - '.github/workflows/safari-engine.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: safari-engine-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    name: WebKit engine (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15]
+    steps:
+      - uses: actions/checkout@v4
+      - name: System
+        run: |
+          sw_vers
+          xcodebuild -version
+          defaults read /Applications/Safari.app/Contents/Info CFBundleShortVersionString || true
+          node --version
+      - name: Run the extension in WebKit
+        run: safari/engine/run.sh build/safari/engine
+      - name: Host logs
+        if: always()
+        run: |
+          for f in build/safari/engine/*.host.log; do
+            echo "=== $f"
+            tail -n 60 "$f" || true
+          done
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: safari-engine-${{ matrix.os }}
+          path: |
+            build/safari/engine/*.json
+            build/safari/engine/*.jsonl
+            build/safari/engine/*.log
+          if-no-files-found: warn
