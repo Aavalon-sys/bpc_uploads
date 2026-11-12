@@ -15,6 +15,10 @@
  *    bpcSafari.updateSessionRules() adapts each rule first:
  *      * initiatorDomains / excludedInitiatorDomains -> domains /
  *        excludedDomains on Safari < 18.4,
+ *      * removes empty excluded-domain lists: Chrome reads them as "no
+ *        exclusion", Safari cannot compile them and then discards every
+ *        rule (the general paywall-script rules have such a list whenever
+ *        no site is disabled, which is the default),
  *      * drops responseHeaders (not supported by Safari),
  *      * removes request headers Safari refuses to modify (Safari 18 only
  *        accepts a fixed list, without X-Forwarded-For) and keeps the rest
@@ -487,6 +491,12 @@
     var r = clone(rule);
     var c = r.condition || (r.condition = {});
     var a = r.action || {};
+    // An empty list of excluded domains excludes nothing. Safari turns it into
+    // an empty condition list, which its content blocker compiler rejects for
+    // the whole rule set.
+    ['excludedInitiatorDomains', 'excludedDomains', 'excludedRequestDomains'].forEach(function (key) {
+      if (Array.isArray(c[key]) && !c[key].length) delete c[key];
+    });
     if (legacyDomainKeys) {
       if (c.initiatorDomains) {
         c.domains = c.initiatorDomains;
@@ -708,7 +718,7 @@
 
   // Rules Safari could not compile, remembered across restarts of the
   // background page (per Safari version) so that they are found only once.
-  var REFUSED_KEY = 'bpc_safari_refused';
+  var REFUSED_KEY = 'bpc_safari_refused_2';
   var refusedRules = {};
   var refusedLoaded = null;
 

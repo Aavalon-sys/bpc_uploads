@@ -11,7 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from '../build.mjs';
 import { runBackground } from './harness.mjs';
-import { ACCEPTED_HEADER_NAMES, safariRuleProblems } from './webkit-rules.mjs';
+import { ACCEPTED_HEADER_NAMES, safariRuleProblems, uncompilable } from './webkit-rules.mjs';
 import { findMismatch } from './sampler.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -48,6 +48,12 @@ test('Chrome release: baseline rules in a Chrome-like browser', async () => {
   assert.deepEqual(chromeRun.errors, []);
   assert.deepEqual(chromeRun.dnrErrors, []);
   assert.ok(chromeRun.sessionRules.length > 500, `only ${chromeRun.sessionRules.length} rules`);
+  // With every site enabled (the default) the general paywall-script rules
+  // have an empty list of excluded domains. Chrome accepts that; in Safari one
+  // such rule makes the whole rule set fail to compile.
+  const general = chromeRun.sessionRules.filter(uncompilable);
+  assert.ok(general.length > 10, `${general.length} rules with an empty excluded list`);
+  assert.ok(general.every((r) => r.action.type === 'block'));
 });
 
 test('Chrome release loaded unchanged in a Safari-like browser installs no rules', async () => {
@@ -100,6 +106,12 @@ for (const version of [[16, 4], [17, 0], [18, 4], [26, 0]]) {
     // Safari rejects the first attempts because of request headers it does not
     // accept; each such header is removed and the update retried.
     assert.equal(run.dnrErrors.length, REFUSED_HEADERS.length, 'one rejected update per refused header');
+    assert.equal(run.silentRollbacks(), 0, 'an update was accepted and then silently undone');
+    assert.deepEqual(run.sessionRules.filter(uncompilable), []);
+    // The general paywall-script rules are kept, without their empty exclusion list.
+    const generalIds = chromeRun.sessionRules.filter(uncompilable).map((r) => r.id);
+    for (const id of generalIds)
+      assert.ok(run.sessionRules.some((r) => baseId(r.id) === id && !('excludedInitiatorDomains' in r.condition) && !('excludedDomains' in r.condition)), `general rule ${id} is missing`);
     assert.ok(onlyHeaderRefusals(run.dnrErrors), JSON.stringify(run.dnrErrors.map((e) => e[0])));
 
     const report = run.sandbox.bpcSafari.report;
@@ -146,6 +158,8 @@ for (const version of [[16, 4], [17, 0], [18, 4], [26, 0]]) {
         delete c.regexFilter;
         if (c.domains) { c.initiatorDomains = c.domains; delete c.domains; }
         if (c.excludedDomains) { c.excludedInitiatorDomains = c.excludedDomains; delete c.excludedDomains; }
+        // An empty exclusion list and no exclusion list mean the same.
+        if (c.excludedInitiatorDomains && !c.excludedInitiatorDomains.length) delete c.excludedInitiatorDomains;
         return c;
       };
       // Same action, apart from the request headers Safari refuses.
@@ -352,7 +366,7 @@ test('Safari build: a rule Safari cannot compile is found, skipped and remembere
   const skipped = [...call.droppedRules].filter((d) => d.reason === 'Safari cannot compile this rule');
   assert.equal(skipped.length, normal.sessionRules.length - expected.length);
   assert.ok(skipped.every((d) => poison(d.rule)));
-  const remembered = run.store.bpc_safari_refused;
+  const remembered = run.store.bpc_safari_refused_2;
   assert.equal(remembered.rules.length, new Set(skipped.map((d) => JSON.stringify(d.rule.condition))).size);
   assert.ok(remembered.headers.includes('x-forwarded-for'));
 

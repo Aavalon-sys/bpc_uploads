@@ -77,9 +77,13 @@ function describeBackground(label, bg) {
   }
 }
 
-function scenario(name, expect) {
+function scenario(name, expect, { optional = false } = {}) {
   const result = readJSON(path.join(dir, `${name}.json`));
   const requests = readRequests(path.join(dir, `${name}.requests.jsonl`));
+  if (!result && optional && !fs.existsSync(path.join(dir, `${name}.host.log`))) {
+    console.log(`\n=== Scenario "${name}" was not run on this machine ===`);
+    return;
+  }
   console.log(`\n=== Scenario "${name}" ===`);
   if (!result) {
     console.log('  no result file');
@@ -162,6 +166,9 @@ scenario('legacy', 'working');
 scenario('launch', 'working');
 scenario('noaccess', 'untouched');
 scenario('private', 'untouched');
+// With the WebKit that ships inside a newer Safari, when the machine has one.
+scenario('staged-enabled', 'working', { optional: true });
+scenario('staged-launch', 'working', { optional: true });
 
 console.log(`\n=== ${failures.length ? failures.length + ' check(s) failed' : 'all checks passed'} ===`);
 for (const f of failures) console.log(`  - ${f}`);

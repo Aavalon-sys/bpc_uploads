@@ -138,3 +138,13 @@ export function safariRuleProblems(rule, version = [17, 0]) {
     problems.push('both included and excluded initiator domains');
   return problems;
 }
+
+// Rules that pass Safari's validation but make its content blocker compiler
+// fail. Safari then silently restores the previous rules and still reports
+// success (seen in the WebKit engine test, safari/engine).
+//  - An empty excludedInitiatorDomains / excludedDomains list becomes an empty
+//    unless-frame-url / unless-domain condition list (JSONInvalidConditionList).
+export function uncompilable(rule) {
+  const c = rule.condition || {};
+  return ['excludedInitiatorDomains', 'excludedDomains'].some((key) => Array.isArray(c[key]) && c[key].length === 0);
+}

@@ -44,6 +44,11 @@ jobs:
           xcodebuild -version
           defaults read /Applications/Safari.app/Contents/Info CFBundleShortVersionString || true
           node --version
+          for dir in /System/Cryptexes/App/System/Library/StagedFrameworks/Safari /System/Volumes/Preboot/Cryptexes/App/System/Library/StagedFrameworks/Safari /Library/Apple/System/Library/StagedFrameworks/Safari; do
+            echo "staged frameworks in $dir:"
+            ls "$dir" 2>/dev/null | head -20 || true
+            defaults read "$dir/WebKit.framework/Resources/Info" CFBundleVersion 2>/dev/null || true
+          done
       - name: Run the extension in WebKit
         env:
           # Lets the three test hosts on the HSTS preload list load from the local server.

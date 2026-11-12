@@ -13,7 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
-import { safariRuleProblems, webkitRegexProblem } from './webkit-rules.mjs';
+import { safariRuleProblems, uncompilable, webkitRegexProblem } from './webkit-rules.mjs';
 
 // The rule the Safari build adds to every update to verify it took effect.
 const MARKER_ID = 9000000;
@@ -138,7 +138,7 @@ export async function runBackground({
       if (extra) problem(rule.id, extra);
     }
     if (problems.length) return problems;
-    if (silentRefusal && add.some((rule) => silentRefusal(rule))) {
+    if (add.some((rule) => (flavor === 'safari' && uncompilable(rule)) || (silentRefusal && silentRefusal(rule)))) {
       // Stored, failed to compile, rolled back: nothing changes, no error.
       silentRollbacks++;
       return null;

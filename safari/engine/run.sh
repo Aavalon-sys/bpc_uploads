@@ -109,6 +109,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Extra environment for the host process (see the staged Safari frameworks below).
+HOST_ENV=()
+
 # run_scenario <name> <host arguments...>
 run_scenario() {
   local name="$1"
@@ -133,7 +136,7 @@ run_scenario() {
   # Start from an empty log (the readiness check above is in it).
   : > "$OUT/$name.requests.jsonl"
   local status=0
-  "$OUT/bpc-webkit-host" --extension "$EXT" --out "$OUT/$name.json" --proxy "127.0.0.1:$PROXY_PORT" "$@" 2> "$OUT/$name.host.log" || status=$?
+  env ${HOST_ENV[@]+"${HOST_ENV[@]}"} "$OUT/bpc-webkit-host" --extension "$EXT" --out "$OUT/$name.json" --proxy "127.0.0.1:$PROXY_PORT" "$@" 2> "$OUT/$name.host.log" || status=$?
   echo "   host exit status: $status"
   stop_server
 }
@@ -154,6 +157,28 @@ run_scenario launch --safari-version "$SAFARI_VERSION" --load-delay 0 --grant al
 run_scenario noaccess --safari-version "$SAFARI_VERSION" --load-delay 6 --grant none "${FEW[@]}"
 # A Private Browsing window (extensions are off there unless the user allows it).
 run_scenario private --safari-version "$SAFARI_VERSION" --load-delay 6 --grant all --private "${FEW[@]}"
+
+# A Safari newer than the system ships its own, newer WebKit ("staged
+# frameworks"). When there is one, repeat the two main scenarios with it, so
+# that both the system engine and the engine of the installed Safari are tested.
+STAGED=""
+for dir in /System/Cryptexes/App/System/Library/StagedFrameworks/Safari \
+           /System/Volumes/Preboot/Cryptexes/App/System/Library/StagedFrameworks/Safari \
+           /Library/Apple/System/Library/StagedFrameworks/Safari; do
+  if [ -d "$dir/WebKit.framework" ]; then
+    STAGED="$dir"
+    break
+  fi
+done
+if [ -n "$STAGED" ] && [ "${BPC_ENGINE_SKIP_STAGED:-}" != "1" ]; then
+  echo "== Staged Safari frameworks: $STAGED"
+  HOST_ENV=("DYLD_FRAMEWORK_PATH=$STAGED" "DYLD_LIBRARY_PATH=$STAGED" "__XPC_DYLD_FRAMEWORK_PATH=$STAGED" "__XPC_DYLD_LIBRARY_PATH=$STAGED")
+  run_scenario staged-enabled --safari-version "$SAFARI_VERSION" --load-delay 6 --grant all "${URLS[@]}"
+  run_scenario staged-launch --safari-version "$SAFARI_VERSION" --load-delay 0 --grant all "${FEW[@]}"
+  HOST_ENV=()
+else
+  echo "== No staged Safari frameworks on this machine (Safari uses the system WebKit)"
+fi
 
 echo "== Report"
 node safari/engine/report.mjs "$OUT"

@@ -42,9 +42,10 @@ export const SITES = {
     blocked: [],
   },
   'www.hola.com': {
-    rule: 'blocked script + element hidden by the content script',
-    scripts: { ok: '/ok.js?n=ok', evolok: '/evolok/ev-em.min.js?n=evolok' },
-    blocked: ['evolok'],
+    rule: 'blocked script + general paywall-script rule + element hidden by the content script',
+    // `general` matches a rule that applies to every site ("/paywall/evercookie_get.js").
+    scripts: { ok: '/ok.js?n=ok', evolok: '/evolok/ev-em.min.js?n=evolok', general: '/paywall/evercookie_get.js?n=general' },
+    blocked: ['evolok', 'general'],
     body: '<div data-ad-title="test" data-probe="ad">ADVERT (the content script hides this)</div>',
   },
   // Not a supported site: the extension must leave it alone.
