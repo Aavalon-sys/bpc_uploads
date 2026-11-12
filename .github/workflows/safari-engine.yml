@@ -45,6 +45,9 @@ jobs:
           defaults read /Applications/Safari.app/Contents/Info CFBundleShortVersionString || true
           node --version
       - name: Run the extension in WebKit
+        env:
+          # Lets the three test hosts on the HSTS preload list load from the local server.
+          BPC_ENGINE_TRUST_CERT: '1'
         run: safari/engine/run.sh build/safari/engine
       - name: Host logs
         if: always()

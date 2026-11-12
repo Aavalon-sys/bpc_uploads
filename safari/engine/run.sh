@@ -8,14 +8,21 @@
 #
 # Needs macOS 15.4 or later with the Xcode command line tools and Node.js.
 # The test pages are served by a local proxy (safari/engine/server.mjs) that
-# only the test's own web views use, so the real sites are never contacted and
+# only the test's own web views use, so the real sites are never contacted.
+#
+# Three of the test hosts are on the system's HSTS preload list, where a
+# self-signed certificate cannot be accepted. With BPC_ENGINE_TRUST_CERT=1 (set
+# in CI) the test certificate is added to the System keychain for the duration
+# of the run, which needs sudo; without it those three hosts are left out and
 # nothing on the machine is changed. Used by .github/workflows/safari-engine.yml.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:-$ROOT/build/safari/engine}"
 EXT="$ROOT/build/safari/extension"
-HOSTS=(www.washingtonpost.com www.nytimes.com www.ft.com www.wsj.com www.hola.com www.bpc-control.test)
+HOSTS=(www.washingtonpost.com www.hola.com www.bpc-control.test)
+HSTS_HOSTS=(www.nytimes.com www.ft.com www.wsj.com)
+CERT_NAME=bpc-engine-test
 HTTPS_PORT=18443
 PROXY_PORT=18080
 
@@ -27,46 +34,66 @@ echo "== Building the extension"
 node safari/build.mjs
 
 echo "== Certificate for the local test sites"
-SAN="$(printf 'DNS:%s,' "${HOSTS[@]}")"
-cat > "$OUT/openssl.cnf" <<EOF
-[req]
-distinguished_name = dn
-x509_extensions = v3
-prompt = no
-[dn]
-CN = bpc-engine-test
-[v3]
-subjectAltName = ${SAN%,}
-basicConstraints = CA:FALSE
-EOF
+SAN="$(printf 'DNS:%s,' "${HOSTS[@]}" "${HSTS_HOSTS[@]}")"
+{
+  echo "[req]"
+  echo "distinguished_name = dn"
+  echo "x509_extensions = v3"
+  echo "prompt = no"
+  echo "[dn]"
+  echo "CN = $CERT_NAME"
+  echo "[v3]"
+  echo "subjectAltName = ${SAN%,}"
+  echo "basicConstraints = CA:FALSE"
+  echo "keyUsage = digitalSignature, keyEncipherment"
+  echo "extendedKeyUsage = serverAuth"
+} > "$OUT/openssl.cnf"
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -keyout "$OUT/key.pem" -out "$OUT/cert.pem" -config "$OUT/openssl.cnf" 2>/dev/null
 
+CERT_TRUSTED=""
+untrust_cert() {
+  if [ -n "$CERT_TRUSTED" ]; then
+    sudo security delete-certificate -c "$CERT_NAME" /Library/Keychains/System.keychain >/dev/null 2>&1 || true
+    CERT_TRUSTED=""
+  fi
+}
+if [ "${BPC_ENGINE_TRUST_CERT:-}" = "1" ]; then
+  echo "== Trusting the test certificate for this run (HSTS hosts)"
+  sudo security authorizationdb write com.apple.trust-settings.admin allow >/dev/null 2>&1 || true
+  if sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$OUT/cert.pem"; then
+    CERT_TRUSTED=1
+    HOSTS=("${HOSTS[0]}" "${HSTS_HOSTS[@]}" "${HOSTS[@]:1}")
+  else
+    echo "   could not trust the certificate; leaving out ${HSTS_HOSTS[*]}"
+  fi
+fi
+
 echo "== Compiling the WebKit host"
-cat > "$OUT/Info.plist" <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleIdentifier</key>
-  <string>io.github.aavalon-sys.bpc-webkit-host</string>
-  <key>CFBundleName</key>
-  <string>bpc-webkit-host</string>
-  <key>NSAppTransportSecurity</key>
-  <dict>
-    <key>NSAllowsArbitraryLoads</key>
-    <true/>
-  </dict>
-</dict>
-</plist>
-EOF
+{
+  echo '<?xml version="1.0" encoding="UTF-8"?>'
+  echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+  echo '<plist version="1.0">'
+  echo '<dict>'
+  echo '  <key>CFBundleIdentifier</key>'
+  echo '  <string>io.github.aavalon-sys.bpc-webkit-host</string>'
+  echo '  <key>CFBundleName</key>'
+  echo '  <string>bpc-webkit-host</string>'
+  echo '  <key>NSAppTransportSecurity</key>'
+  echo '  <dict>'
+  echo '    <key>NSAllowsArbitraryLoads</key>'
+  echo '    <true/>'
+  echo '  </dict>'
+  echo '</dict>'
+  echo '</plist>'
+} > "$OUT/Info.plist"
 xcrun clang -fobjc-arc -fmodules -mmacosx-version-min=15.4 \
   -framework Cocoa -framework Network -framework WebKit \
   -Wl,-sectcreate,__TEXT,__info_plist,"$OUT/Info.plist" \
   safari/engine/host.m -o "$OUT/bpc-webkit-host"
 
-# The Safari version of this machine, for a Safari-like user agent.
+# The Safari version of this machine, for a Safari-like browser identity.
 SAFARI_VERSION="${SAFARI_VERSION:-$(defaults read /Applications/Safari.app/Contents/Info CFBundleShortVersionString 2>/dev/null || echo 18.6)}"
-echo "   Safari version used in the user agent: $SAFARI_VERSION"
+echo "   Safari version presented to the extension: $SAFARI_VERSION"
 
 SERVER_PID=""
 stop_server() {
@@ -76,7 +103,11 @@ stop_server() {
     SERVER_PID=""
   fi
 }
-trap stop_server EXIT
+cleanup() {
+  stop_server
+  untrust_cert
+}
+trap cleanup EXIT
 
 # run_scenario <name> <host arguments...>
 run_scenario() {
@@ -115,7 +146,7 @@ FEW=(--url "https://www.washingtonpost.com/test/article.html" --url "https://www
 
 # The user has just enabled the extension and allowed every website.
 run_scenario enabled --safari-version "$SAFARI_VERSION" --load-delay 6 --grant all "${URLS[@]}"
-# The same with the user agent of a Safari before 18.4 (older rule syntax).
+# The same with the browser identity of a Safari before 18.4 (older rule syntax).
 run_scenario legacy --safari-version 17.6 --load-delay 6 --grant all "${FEW[@]}"
 # The extension is loaded while the browser starts (WebKit sends no install event then).
 run_scenario launch --safari-version "$SAFARI_VERSION" --load-delay 0 --grant all "${FEW[@]}"

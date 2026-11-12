@@ -330,3 +330,55 @@ test('Safari build: a repeated install event does not reset the chosen sites', a
   assert.deepEqual(Object.keys(run.store.sites).sort(), Object.keys(chosen).sort());
   assert.equal(run.optionsOpened, 1);
 });
+
+// --- Updates Safari accepts and then silently undoes -----------------------
+
+test('Safari build: a rule Safari cannot compile is found, skipped and remembered', async () => {
+  // Safari stores new rules, compiles all of them into one content blocker and,
+  // when that fails, restores the previous rules while reporting success.
+  const poison = (rule) => rule.condition.regexFilter === '\\.poool\\.fr\\/';
+  const normal = await runBackground({ extDir: safariDir, flavor: 'safari', safariVersion: [18, 4] });
+  const expected = normal.sessionRules.filter((r) => !poison(r));
+  assert.ok(expected.length < normal.sessionRules.length && expected.length > 700);
+
+  const run = await runBackground({ extDir: safariDir, flavor: 'safari', safariVersion: [18, 4], silentRefusal: poison, settleMs: 2500 });
+  assert.deepEqual(run.errors.map(String), []);
+  assert.ok(run.silentRollbacks() > 0, 'the mock never rolled an update back');
+  // Without verification the extension would now have no rules at all.
+  assert.deepEqual(run.sessionRules.map((r) => r.id).sort((a, b) => a - b), expected.map((r) => r.id).sort((a, b) => a - b));
+  const call = run.sandbox.bpcSafari.report.lastAddCall;
+  assert.equal(call.rulesOut, expected.length);
+  assert.ok(call.rollbacks > 0);
+  const skipped = [...call.droppedRules].filter((d) => d.reason === 'Safari cannot compile this rule');
+  assert.equal(skipped.length, normal.sessionRules.length - expected.length);
+  assert.ok(skipped.every((d) => poison(d.rule)));
+  const remembered = run.store.bpc_safari_refused;
+  assert.equal(remembered.rules.length, new Set(skipped.map((d) => JSON.stringify(d.rule.condition))).size);
+  assert.ok(remembered.headers.includes('x-forwarded-for'));
+
+  // Next start of the background page: nothing has to be found again.
+  const again = await runBackground({ extDir: safariDir, flavor: 'safari', safariVersion: [18, 4], silentRefusal: poison, initialStore: run.store });
+  assert.equal(again.silentRollbacks(), 0);
+  assert.deepEqual(again.dnrErrors, [], 'refused headers were not remembered');
+  assert.equal(again.sessionRules.length, expected.length);
+  assert.equal(again.sandbox.bpcSafari.report.lastAddCall.rollbacks, 0);
+
+  // A Safari update may fix it: what was learned is tied to the Safari version.
+  const upgraded = await runBackground({ extDir: safariDir, flavor: 'safari', safariVersion: [26, 0], initialStore: run.store });
+  assert.equal(upgraded.sessionRules.length, normal.sessionRules.length);
+});
+
+test('Safari build: an unchanged rule set produces an identical update', async () => {
+  // The background page restarts often; Safari reuses its compiled rule list
+  // only when the rules are exactly the same, marker rule included.
+  // The very first start has to learn which headers Safari refuses.
+  const first = await runBackground({ extDir: safariDir, flavor: 'safari', safariVersion: [18, 4] });
+  const second = await runBackground({ extDir: safariDir, flavor: 'safari', safariVersion: [18, 4], initialStore: first.store });
+  const third = await runBackground({ extDir: safariDir, flavor: 'safari', safariVersion: [18, 4], initialStore: second.store });
+  assert.ok(second.currentMarker(), 'no marker rule');
+  assert.match(second.currentMarker().condition.urlFilter, /^\|\|bpc-safari-marker\.invalid\/[a-z0-9]+$/);
+  const lastAdd = (run) => run.dnrCalls.filter((c) => (c.addRules || []).length > 100).pop();
+  assert.deepEqual(lastAdd(third).addRules, lastAdd(second).addRules);
+  assert.equal(second.dnrErrors.length, 0);
+  assert.equal(third.dnrErrors.length, 0);
+});

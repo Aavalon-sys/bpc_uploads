@@ -139,6 +139,7 @@ static id callJSON(WKWebView *webView, NSString *body, WKContentWorld *world, NS
 @interface BPCWindow : NSObject <WKWebExtensionWindow>
 @property (nonatomic, strong) NSMutableArray<BPCTab *> *tabs;
 @property (nonatomic, strong) BPCTab *activeTab;
+@property (nonatomic) BOOL privateBrowsing;
 @end
 
 @interface BPCHost : NSObject <WKWebExtensionControllerDelegate>
@@ -168,7 +169,7 @@ static id callJSON(WKWebView *webView, NSString *body, WKContentWorld *world, NS
 - (id<WKWebExtensionTab>)activeTabForWebExtensionContext:(WKWebExtensionContext *)context { return _activeTab; }
 - (WKWebExtensionWindowType)windowTypeForWebExtensionContext:(WKWebExtensionContext *)context { return WKWebExtensionWindowTypeNormal; }
 - (WKWebExtensionWindowState)windowStateForWebExtensionContext:(WKWebExtensionContext *)context { return WKWebExtensionWindowStateNormal; }
-- (BOOL)isPrivateForWebExtensionContext:(WKWebExtensionContext *)context { return NO; }
+- (BOOL)isPrivateForWebExtensionContext:(WKWebExtensionContext *)context { return _privateBrowsing; }
 - (CGRect)screenFrameForWebExtensionContext:(WKWebExtensionContext *)context { return CGRectMake(0, 0, 1920, 1080); }
 - (CGRect)frameForWebExtensionContext:(WKWebExtensionContext *)context { return CGRectMake(50, 50, 1200, 800); }
 - (void)focusForWebExtensionContext:(WKWebExtensionContext *)context completionHandler:(void (^)(NSError *))completionHandler { completionHandler(nil); }
@@ -415,7 +416,7 @@ static NSString * const kBackgroundProbe = @""
     "  out.manifestVersion = manifest.version;"
     "  out.hasChrome = typeof chrome === 'object'; out.hasBrowser = typeof browser === 'object';"
     "  out.backgroundLoaded = typeof isSiteEnabled === 'function';"
-    "  out.compat = typeof bpcSafari === 'object' ? { safariVersion: bpcSafari.report.safariVersion, legacyDomainKeys: bpcSafari.report.legacyDomainKeys, calls: bpcSafari.report.calls, errors: bpcSafari.report.errors || null, lastAddCall: bpcSafari.report.lastAddCall ? { rulesIn: bpcSafari.report.lastAddCall.rulesIn, rulesOut: bpcSafari.report.lastAddCall.rulesOut, batchRejected: bpcSafari.report.lastAddCall.batchRejected, dropped: bpcSafari.report.lastAddCall.droppedRules.length } : null } : null;"
+    "  out.compat = typeof bpcSafari === 'object' ? { safariVersion: bpcSafari.report.safariVersion, legacyDomainKeys: bpcSafari.report.legacyDomainKeys, calls: bpcSafari.report.calls, errors: bpcSafari.report.errors || null, lastAddCall: bpcSafari.report.lastAddCall ? { rulesIn: bpcSafari.report.lastAddCall.rulesIn, rulesOut: bpcSafari.report.lastAddCall.rulesOut, batchRejected: bpcSafari.report.lastAddCall.batchRejected, dropped: bpcSafari.report.lastAddCall.droppedRules.length, rollbacks: bpcSafari.report.lastAddCall.rollbacks, strippedHeaders: bpcSafari.report.lastAddCall.strippedHeaders, uncompilable: bpcSafari.report.lastAddCall.droppedRules.filter(d => /cannot compile|rejected by Safari/.test(d.reason)).slice(0, 40).map(d => ({ id: d.id, reason: d.reason.slice(0, 160), rule: d.rule })) } : null } : null;"
     "  out.enabledSites = typeof enabledSites !== 'undefined' ? enabledSites.length : null;"
     "  out.selfHosted = typeof self_hosted !== 'undefined' ? self_hosted : null;"
     "  out.extChromium = typeof ext_chromium !== 'undefined' ? ext_chromium : null;"
@@ -423,6 +424,8 @@ static NSString * const kBackgroundProbe = @""
     "  const stored = await api.storage.local.get(null);"
     "  out.storageKeys = Object.keys(stored).sort();"
     "  out.storedSites = stored.sites ? Object.keys(stored.sites).length : null;"
+    "  out.storedSiteNames = stored.sites ? Object.keys(stored.sites) : null;"
+    "  out.refused = stored.bpc_safari_refused || null;"
     "  const rules = await api.declarativeNetRequest.getSessionRules();"
     "  out.sessionRules = rules.length;"
     "  const byType = {}; for (const r of rules) byType[r.action.type] = (byType[r.action.type] || 0) + 1;"
@@ -594,6 +597,7 @@ int main(int argc, const char *argv[])
         [host.nativeWindow orderFrontRegardless];
 
         host.window = [[BPCWindow alloc] init];
+        host.window.privateBrowsing = privateBrowsing;
         [host.controller didOpenWindow:host.window];
         BPCTab *tab = [host openTabActive:YES];
         [host.controller didFocusWindow:host.window];

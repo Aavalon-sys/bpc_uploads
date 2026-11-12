@@ -24,6 +24,10 @@
  *        patterns, each becoming its own rule,
  *    and, if Safari still rejects the batch, applies it in halves to isolate
  *    and skip the rules Safari refuses.
+ *    Safari also reports success when the rule list then fails to compile: it
+ *    silently restores the previous rules. Every update therefore carries a
+ *    marker rule and is verified afterwards; a rolled back update is applied
+ *    in halves to find the rule Safari cannot compile, which is remembered.
  *  - Safari sends no install event to an extension that is first loaded while
  *    Safari starts, so the default sites were never enabled there:
  *    bpcSafari.firstRun() does the first-time setup exactly once, with or
@@ -567,6 +571,7 @@
       dropped: dropped,
       strippedHeaders: call.strippedHeaders,
       refusedHeaders: Object.keys(refusedHeaders),
+      rollbacks: call.rollbacks,
       batchRejected: call.batchRejected,
     };
   }
@@ -654,6 +659,90 @@
     return m ? m[1].toLowerCase() : null;
   }
 
+  // --- Verifying that an update really took effect ---------------------------
+  //
+  // After storing new rules Safari compiles all of them into one content
+  // blocker. When that fails (one pattern it cannot compile is enough) it puts
+  // the previous rules back and still reports success. Each update therefore
+  // carries a marker rule, which matches no real request, and is checked for
+  // afterwards.
+  var MARKER_ID = 9000000; // above upstream ids, below the variant ids
+  var markerCount = 0;
+
+  function hashOf(text) {
+    var h = 0x811c9dc5;
+    for (var i = 0; i < text.length; i++) {
+      h ^= text.charCodeAt(i);
+      h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+    }
+    return h.toString(36);
+  }
+
+  // `stable` markers depend on the rules only, so that an unchanged rule set
+  // produces an identical update and Safari can reuse its compiled list (the
+  // background page restarts often). Retries use a fresh marker each time.
+  function markerFor(rules, stable) {
+    var tag = hashOf(JSON.stringify(rules)) + (stable ? '' : '-' + (++markerCount) + '-' + Date.now().toString(36));
+    return {
+      id: MARKER_ID,
+      priority: 1,
+      action: { type: 'allow' },
+      condition: { urlFilter: '||bpc-safari-marker.invalid/' + tag, resourceTypes: ['main_frame'] },
+    };
+  }
+
+  function isMarker(rule) {
+    return !!rule && rule.id === MARKER_ID;
+  }
+
+  function wasCommitted(marker) {
+    if (typeof dnr.getSessionRules !== 'function') return Promise.resolve(true);
+    return callDnr('getSessionRules').then(function (rules) {
+      return (rules || []).some(function (r) {
+        return r.id === MARKER_ID && r.condition && r.condition.urlFilter === marker.condition.urlFilter;
+      });
+    }, function () {
+      return true; // cannot tell: assume it worked
+    });
+  }
+
+  // Rules Safari could not compile, remembered across restarts of the
+  // background page (per Safari version) so that they are found only once.
+  var REFUSED_KEY = 'bpc_safari_refused';
+  var refusedRules = {};
+  var refusedLoaded = null;
+
+  function ruleKey(rule) {
+    var c = rule.condition || {};
+    var parts = Object.keys(c).sort().map(function (k) { return k + '=' + JSON.stringify(c[k]); });
+    return (rule.action && rule.action.type) + '|' + parts.join('|');
+  }
+
+  function loadRefused() {
+    if (!refusedLoaded) {
+      refusedLoaded = Promise.resolve().then(function () {
+        return api.storage.local.get([REFUSED_KEY]);
+      }).then(function (items) {
+        var saved = items && items[REFUSED_KEY];
+        if (!saved || saved.safari !== String(version)) return;
+        (saved.rules || []).forEach(function (key) { refusedRules[key] = true; });
+        (saved.headers || []).forEach(function (name) { refusedHeaders[name] = true; });
+      }).catch(function () {});
+    }
+    return refusedLoaded;
+  }
+
+  function saveRefused() {
+    try {
+      var record = {};
+      record[REFUSED_KEY] = { safari: String(version), rules: Object.keys(refusedRules).slice(-300), headers: Object.keys(refusedHeaders) };
+      var p = api.storage.local.set(record);
+      if (p && typeof p.catch === 'function') p.catch(function () {});
+    } catch (e) {
+      // best effort
+    }
+  }
+
   // Adds rules, coping with the ways Safari refuses an update. Safari reports
   // an invalid rule as "Rule with id N is invalid. <reason>" and rejects the
   // whole call (a failed attempt is cheap, a successful one recompiles the
@@ -664,13 +753,36 @@
   //    dropped;
   //  - without a usable message the list is applied in halves until the
   //    refused rules are isolated.
+  // An update Safari accepted but then rolled back is applied in halves too.
   var MAX_NAMED_RETRIES = 500;
   function addRulesTolerantly(rules, result) {
     if (!rules.length) return Promise.resolve();
-    return callDnr('updateSessionRules', { addRules: rules }).then(function () {
-      result.rulesOut += rules.length;
+    var marker = markerFor(rules, false);
+    return callDnr('updateSessionRules', { addRules: rules.concat([marker]), removeRuleIds: [MARKER_ID] }).then(function () {
+      return wasCommitted(marker).then(function (committed) {
+        if (committed) {
+          result.rulesOut += rules.length;
+          return undefined;
+        }
+        return afterRollback(rules, result);
+      });
     }, function (err) {
       return afterRejection(rules, result, err);
+    });
+  }
+
+  // Safari accepted `rules` but could not compile the resulting rule list and
+  // restored the previous state: find the rule(s) responsible.
+  function afterRollback(rules, result) {
+    result.rollbacks++;
+    if (rules.length === 1) {
+      refusedRules[ruleKey(rules[0])] = true;
+      result.droppedRules.push({ id: rules[0].id, reason: 'Safari cannot compile this rule', rule: rules[0] });
+      return Promise.resolve();
+    }
+    var mid = Math.ceil(rules.length / 2);
+    return addRulesTolerantly(rules.slice(0, mid), result).then(function () {
+      return addRulesTolerantly(rules.slice(mid), result);
     });
   }
 
@@ -722,12 +834,31 @@
   }
 
   function applyBatch(rules, removeRuleIds, result) {
-    return callDnr('updateSessionRules', { addRules: rules, removeRuleIds: removeRuleIds }).then(function () {
-      result.rulesOut += rules.length;
+    if (!rules.length) {
+      // Nothing to add, so nothing to verify.
+      if (!removeRuleIds.length) return Promise.resolve();
+      return callDnr('updateSessionRules', { removeRuleIds: removeRuleIds });
+    }
+    var marker = markerFor(rules, true);
+    var removals = removeRuleIds.concat([MARKER_ID]);
+    // Whatever went wrong, nothing was applied: do the removals on their own,
+    // then add again.
+    function removeThen(next) {
+      return callDnr('updateSessionRules', { removeRuleIds: removals }).catch(function () {}).then(next);
+    }
+    return callDnr('updateSessionRules', { addRules: rules.concat([marker]), removeRuleIds: removals }).then(function () {
+      return wasCommitted(marker).then(function (committed) {
+        if (committed) {
+          result.rulesOut += rules.length;
+          return undefined;
+        }
+        return removeThen(function () {
+          return afterRollback(rules, result);
+        });
+      });
     }, function (err) {
       result.batchRejected = err.message;
-      // Nothing was applied: do the removals on their own, then add again.
-      return callDnr('updateSessionRules', { removeRuleIds: removeRuleIds }).catch(function () {}).then(function () {
+      return removeThen(function () {
         return afterRejection(rules, result, err);
       });
     });
@@ -750,12 +881,13 @@
       droppedRules: [],
       strippedHeaders: {}, // refused header name -> number of rules it was removed from
       namedRetries: 0,
+      rollbacks: 0, // updates Safari accepted and then silently undid
       batchRejected: false,
     };
 
-    var existing = typeof dnr.getSessionRules === 'function'
-      ? callDnr('getSessionRules').catch(function () { return []; })
-      : Promise.resolve([]);
+    var existing = loadRefused().then(function () {
+      return typeof dnr.getSessionRules === 'function' ? callDnr('getSessionRules').catch(function () { return []; }) : [];
+    });
 
     return existing.then(function (current) {
       // Remove the extra variant rules belonging to every upstream id that is
@@ -770,9 +902,16 @@
         if (res.dropped) result.droppedRules.push({ id: addRules[k].id, reason: res.dropped, rule: addRules[k] });
         if (res.expanded) result.expandedRules++;
         if (res.partial) result.partialRules++;
-        out = out.concat(res.rules);
+        res.rules.forEach(function (rule) {
+          if (refusedRules[ruleKey(rule)])
+            result.droppedRules.push({ id: rule.id, reason: 'Safari cannot compile this rule', rule: rule });
+          else
+            out.push(rule);
+        });
       });
+      var knownBefore = Object.keys(refusedRules).length + Object.keys(refusedHeaders).length;
       return applyBatch(out, removeRuleIds, result).then(function () {
+        if (Object.keys(refusedRules).length + Object.keys(refusedHeaders).length !== knownBefore) saveRefused();
         report.calls++;
         report.lastCall = result;
         if (addRules.length) {
@@ -894,6 +1033,8 @@
     report: report,
     // exposed for tests
     _diagnostics: diagnostics,
+    _isMarker: isMarker,
+    _MARKER_ID: MARKER_ID,
     _rewriteRegex: rewriteRegex,
     _parseRegex: parseRegex,
     _webkitRegexProblem: webkitRegexProblem,

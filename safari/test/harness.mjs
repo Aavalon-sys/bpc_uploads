@@ -15,6 +15,9 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { safariRuleProblems, webkitRegexProblem } from './webkit-rules.mjs';
 
+// The rule the Safari build adds to every update to verify it took effect.
+const MARKER_ID = 9000000;
+
 function makeEvent() {
   const listeners = [];
   return {
@@ -37,9 +40,12 @@ export async function runBackground({
   extraRuleCheck = null, // (rule) => problem string or null, to simulate other Safari refusals
   errorStyle = 'plain', // 'webkit': "Rule with id N is invalid. ..." like Safari reports it
   fireInstalled = true, // false: like an extension first loaded while Safari starts (no install event)
+  silentRefusal = null, // (rule) => true: Safari accepts the update, cannot compile it and silently restores the old rules
+  initialStore = null, // extension storage left by an earlier run
 } = {}) {
   const manifest = JSON.parse(fs.readFileSync(path.join(extDir, 'manifest.json'), 'utf8'));
-  const store = {};
+  const store = initialStore ? structuredClone(initialStore) : {};
+  let silentRollbacks = 0;
   const dnrCalls = [];
   const dnrErrors = [];
   const scriptCalls = [];
@@ -132,6 +138,11 @@ export async function runBackground({
       if (extra) problem(rule.id, extra);
     }
     if (problems.length) return problems;
+    if (silentRefusal && add.some((rule) => silentRefusal(rule))) {
+      // Stored, failed to compile, rolled back: nothing changes, no error.
+      silentRollbacks++;
+      return null;
+    }
     for (const id of remove) sessionRules.delete(id);
     for (const rule of add) sessionRules.set(rule.id, structuredClone(rule));
     return null;
@@ -297,7 +308,9 @@ export async function runBackground({
   return {
     api,
     settle: (ms = settleMs) => new Promise((r) => setTimeout(r, ms)),
-    currentRules: () => [...sessionRules.values()].map((r) => structuredClone(r)),
+    currentRules: () => [...sessionRules.values()].filter((r) => r.id !== MARKER_ID).map((r) => structuredClone(r)),
+    currentMarker: () => structuredClone(sessionRules.get(MARKER_ID) || null),
+    silentRollbacks: () => silentRollbacks,
     manifest,
     loadError,
     errors,
@@ -305,7 +318,8 @@ export async function runBackground({
     dnrCalls,
     dnrErrors,
     scriptCalls,
-    sessionRules: [...sessionRules.values()],
+    // Without the marker rule the Safari build adds to verify its updates.
+    sessionRules: [...sessionRules.values()].filter((r) => r.id !== MARKER_ID),
     optionsOpened,
     store,
     sandbox,

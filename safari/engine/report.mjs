@@ -56,6 +56,8 @@ function describeBackground(label, bg) {
   const c = bg.compat || {};
   console.log(`  ${label}: loaded=${bg.backgroundLoaded} enabledSites=${bg.enabledSites} storedSites=${bg.storedSites} sessionRules=${bg.sessionRules} ${JSON.stringify(bg.sessionRulesByType || {})}`);
   console.log(`      compat: version=${JSON.stringify(c.safariVersion)} legacyDomainKeys=${c.legacyDomainKeys} lastAddCall=${JSON.stringify(c.lastAddCall)} errors=${JSON.stringify(c.errors)}`);
+  for (const u of (c.lastAddCall && c.lastAddCall.uncompilable) || []) console.log(`      SKIPPED rule ${u.id}: ${u.reason} ${JSON.stringify(u.rule)}`);
+  console.log(`      remembered as refused: ${JSON.stringify(bg.refused)}`);
   console.log(`      manifest keys: ${(bg.manifestKeys || []).join(',')} | chrome=${bg.hasChrome} browser=${bg.hasBrowser} extChromium=${bg.extChromium} selfHosted=${bg.selfHosted}`);
   console.log(`      permissions: ${JSON.stringify(bg.permissions)} origins=${bg.origins} ${JSON.stringify(bg.originsSample)}`);
   console.log(`      storage keys: ${(bg.storageKeys || []).join(',')}`);
@@ -148,6 +150,9 @@ function scenario(name, expect) {
     check(name, bg.backgroundLoaded === true, 'background scripts loaded');
     check(name, bg.enabledSites > 500, `sites are enabled (${bg.enabledSites})`);
     check(name, bg.sessionRules > 700, `blocking/header rules are installed (${bg.sessionRules})`);
+    const believed = bg.compat && bg.compat.lastAddCall ? bg.compat.lastAddCall.rulesOut : null;
+    // One more than the extension's own count: the marker rule that verifies each update.
+    check(name, believed !== null && bg.sessionRules === believed + 1, `the rules the extension believes it installed are really there (${believed} + marker vs ${bg.sessionRules})`);
     check(name, !(bg.compat && bg.compat.errors && bg.compat.errors.length), `no uncaught errors in the background page`);
   }
 }

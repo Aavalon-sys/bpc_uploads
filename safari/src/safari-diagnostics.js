@@ -101,6 +101,8 @@
 
       // Rules
       if (Array.isArray(rules)) {
+        // Without the marker rule the Safari build adds to verify its updates.
+        rules = rules.filter(function (rule) { return rule.id !== 9000000; });
         var byType = {};
         rules.forEach(function (rule) {
           byType[rule.action.type] = (byType[rule.action.type] || 0) + 1;
