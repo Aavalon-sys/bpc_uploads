@@ -203,6 +203,7 @@ export async function runBackground({
     tabs: {
       onUpdated: makeEvent(),
       onActivated: makeEvent(),
+      onRemoved: makeEvent(),
       query: (q, cb) => { if (cb) later(() => cb([])); return Promise.resolve([]); },
       get: (id, cb) => { if (cb) later(() => cb({ id })); return Promise.resolve({ id }); },
       reload: () => Promise.resolve(),
@@ -233,6 +234,13 @@ export async function runBackground({
         scriptCalls.push(JSON.parse(JSON.stringify(details, (k, v) => (typeof v === 'function' ? '[function]' : v))));
         return Promise.resolve([{ frameId: 0, result: undefined }]);
       },
+    },
+    webNavigation: {
+      onBeforeNavigate: makeEvent(),
+      onCommitted: makeEvent(),
+      onDOMContentLoaded: makeEvent(),
+      onCompleted: makeEvent(),
+      onErrorOccurred: makeEvent(),
     },
     webRequest: {
       onBeforeRequest: makeEvent(),

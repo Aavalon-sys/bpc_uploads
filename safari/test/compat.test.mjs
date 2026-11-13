@@ -227,3 +227,254 @@ test('stored sites: a storage failure is recorded, not thrown', async () => {
   assert.equal(await sandbox.bpcSafari.repairSiteNames(DEFAULTS), null);
   assert.match(JSON.stringify(sandbox.bpcSafari.report.errors), /site name repair failed: storage is gone/);
 });
+
+// --- Sites that refuse a crawler's user agent --------------------------------
+// Safari cannot send X-Forwarded-For, so a Googlebot rule claims to be Googlebot
+// from the user's own address. A site that answers that with nothing, or with
+// a denial, is found when it is visited and gets the rule without the user agent.
+
+const GOOGLEBOT = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
+const crawlerRule = (id, domain) => ({
+  id,
+  priority: 1,
+  action: { type: 'modifyHeaders', requestHeaders: [{ header: 'User-Agent', operation: 'set', value: GOOGLEBOT }, { header: 'Referer', operation: 'set', value: 'https://www.google.com/' }] },
+  condition: { urlFilter: '||' + domain, resourceTypes: ['main_frame', 'sub_frame', 'xmlhttprequest', 'script'] },
+});
+const ARTICLE_PAGE = { title: 'An article', length: 6000, text: 'A long article about something.' };
+const DENIAL_PAGE = { title: 'Access Denied', length: 140, text: "Access Denied You don't have permission to access this page on this server." };
+const XFF_REFUSED = { bpc_safari_refused_2: { safari: '18,4', rules: [], headers: ['x-forwarded-for'] } };
+const flush = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setImmediate(r)); };
+
+// The compat layer with a browser in which navigations can be played out.
+function crawlerWorld({ stored = XFF_REFUSED, rules = [crawlerRule(1, 'example-news.com'), crawlerRule(2, 'other-news.com')] } = {}) {
+  const world = { timers: [], tabUpdates: [], dnrUpdates: [], tabStatus: 'loading', page: ARTICLE_PAGE, stored: structuredClone(stored) };
+  const listeners = { onBeforeNavigate: [], onCommitted: [], onCompleted: [], onRemoved: [] };
+  const sessionRules = new Map(rules.map((r) => [r.id, structuredClone(r)]));
+  const event = (name) => ({ addListener: (fn) => listeners[name].push(fn) });
+  const plain = (v) => JSON.parse(JSON.stringify(v));
+  const sandbox = {
+    navigator: { userAgent: 'Mozilla/5.0 (Macintosh) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15' },
+    console: { info() {}, log() {}, warn() {}, error() {} },
+    setTimeout: (fn, ms) => { const t = { fn, ms, cleared: false, fired: false }; world.timers.push(t); return t; },
+    clearTimeout: (t) => { if (t) t.cleared = true; },
+    addEventListener() {},
+    browser: {
+      runtime: { id: 'x', getManifest: () => ({ name: 'Bypass Paywalls Clean', version: '1' }), onMessage: { addListener() {} } },
+      storage: {
+        local: {
+          set: (o) => { Object.assign(world.stored, plain(o)); return Promise.resolve(); },
+          get: (keys) => Promise.resolve(Object.fromEntries(keys.filter((k) => k in world.stored).map((k) => [k, plain(world.stored[k])]))),
+        },
+      },
+      declarativeNetRequest: {
+        getSessionRules: () => Promise.resolve([...sessionRules.values()].map(plain)),
+        updateSessionRules: (o) => {
+          world.dnrUpdates.push(plain(o));
+          (o.removeRuleIds || []).forEach((id) => sessionRules.delete(id));
+          (o.addRules || []).forEach((r) => sessionRules.set(r.id, plain(r)));
+          return Promise.resolve();
+        },
+      },
+      webNavigation: { onBeforeNavigate: event('onBeforeNavigate'), onCommitted: event('onCommitted'), onCompleted: event('onCompleted') },
+      tabs: {
+        onRemoved: event('onRemoved'),
+        get: (id) => Promise.resolve({ id, status: world.tabStatus }),
+        update: (id, properties) => { world.tabUpdates.push({ id, ...plain(properties) }); return Promise.resolve({ id }); },
+      },
+      scripting: { executeScript: () => Promise.resolve([{ frameId: 0, result: world.page }]) },
+    },
+  };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(compatFile, 'utf8'), sandbox, { filename: compatFile });
+  world.crawler = sandbox.bpcSafari._crawler;
+  world.bpcSafari = sandbox.bpcSafari;
+  world.rule = (id) => (sessionRules.has(id) ? plain(sessionRules.get(id)) : null);
+  world.headers = (id) => (world.rule(id) ? world.rule(id).action.requestHeaders.map((h) => h.header) : null);
+  world.fire = async (name, details) => { listeners[name].forEach((fn) => fn(details)); await flush(); };
+  // The timers that wait for the first answer of a navigation.
+  world.waiting = () => world.timers.filter((t) => !t.cleared && !t.fired && t.ms === world.crawler.STALL_MS);
+  world.timeOut = async () => {
+    const [timer] = world.waiting();
+    assert.ok(timer, 'no navigation is being waited for');
+    timer.fired = true;
+    timer.fn();
+    await flush();
+  };
+  // One main-frame navigation from start to finish.
+  world.load = async (tabId, url) => {
+    await world.fire('onBeforeNavigate', { tabId, frameId: 0, url });
+    await world.fire('onCommitted', { tabId, frameId: 0, url });
+    await world.fire('onCompleted', { tabId, frameId: 0, url });
+  };
+  return world;
+}
+const NEWS = 'https://www.example-news.com/2026/article.html';
+
+test('crawler: a site that never answers gets the rule without the user agent, and the page is loaded again', async () => {
+  const world = crawlerWorld();
+  await world.fire('onBeforeNavigate', { tabId: 5, frameId: 0, url: NEWS });
+  assert.equal(world.waiting().length, 1, 'the navigation is watched');
+  assert.deepEqual(world.headers(1), ['User-Agent', 'Referer']);
+
+  await world.timeOut();
+  assert.deepEqual(world.headers(1), ['Referer'], 'the rule lost the crawler user agent');
+  assert.deepEqual(world.headers(2), ['User-Agent', 'Referer'], 'other sites keep theirs');
+  assert.deepEqual(world.tabUpdates, [{ id: 5, url: NEWS }]);
+  assert.equal(world.crawler.refusedBy['example-news.com'].tentative, true);
+  assert.ok(!('bpc_safari_crawler' in world.stored), 'nothing is remembered before the repeated load worked');
+
+  // The repeated navigation loads.
+  await world.load(5, NEWS);
+  const entry = world.crawler.refusedBy['example-news.com'];
+  assert.equal(entry.tentative, undefined);
+  assert.equal(entry.times, 1);
+  assert.match(entry.reason, /no answer within 12 s/);
+  assert.ok(Math.abs(entry.until - (Date.now() + 24 * 3600 * 1000)) < 60000, 'remembered for a day the first time');
+  assert.deepEqual(Object.keys(world.stored.bpc_safari_crawler.refusedBy), ['example-news.com']);
+  assert.deepEqual(world.tabUpdates.length, 1, 'the page is repeated once');
+  assert.deepEqual(world.headers(1), ['Referer']);
+
+  // Later visits are not watched any more.
+  await world.fire('onBeforeNavigate', { tabId: 5, frameId: 0, url: NEWS });
+  assert.equal(world.waiting().length, 0);
+});
+
+test('crawler: a denial page has the same effect', async () => {
+  const world = crawlerWorld();
+  world.page = DENIAL_PAGE;
+  await world.load(7, NEWS);
+  assert.deepEqual(world.headers(1), ['Referer']);
+  assert.deepEqual(world.tabUpdates, [{ id: 7, url: NEWS }]);
+  world.page = ARTICLE_PAGE;
+  await world.load(7, NEWS);
+  assert.match(world.crawler.refusedBy['example-news.com'].reason, /denied \("Access Denied"\)/);
+  assert.equal(world.crawler.refusedBy['example-news.com'].times, 1);
+});
+
+test('crawler: when the page fails without the user agent too, the user agent comes back', async () => {
+  const world = crawlerWorld();
+  await world.fire('onBeforeNavigate', { tabId: 5, frameId: 0, url: NEWS });
+  await world.timeOut();
+  assert.deepEqual(world.headers(1), ['Referer']);
+  // The repeated navigation gets no answer either: the network, not the user agent.
+  await world.fire('onBeforeNavigate', { tabId: 5, frameId: 0, url: NEWS });
+  await world.timeOut();
+  assert.deepEqual(world.headers(1), ['User-Agent', 'Referer'], 'the rule is as it was');
+  assert.deepEqual(world.rule(1), crawlerRule(1, 'example-news.com'));
+  assert.ok(!('example-news.com' in world.crawler.refusedBy));
+  assert.ok(world.crawler.cleared['example-news.com'] > Date.now() - 60000);
+  assert.ok(world.stored.bpc_safari_crawler.cleared['example-news.com']);
+  assert.equal(world.tabUpdates.length, 1, 'no third attempt');
+  // Not examined again for now.
+  await world.fire('onBeforeNavigate', { tabId: 5, frameId: 0, url: NEWS });
+  assert.equal(world.waiting().length, 0);
+
+  // The same with a denial both times (a site that blocks this visitor whatever it sends).
+  const denied = crawlerWorld();
+  denied.page = DENIAL_PAGE;
+  await denied.load(3, NEWS);
+  await denied.load(3, NEWS);
+  assert.deepEqual(denied.headers(1), ['User-Agent', 'Referer']);
+  assert.ok(denied.crawler.cleared['example-news.com']);
+  assert.equal(denied.tabUpdates.length, 1);
+});
+
+test('crawler: a load that ended, was replaced or answered in time is left alone', async () => {
+  // The user stopped the load, or it failed: the tab is not loading any more.
+  const stopped = crawlerWorld();
+  await stopped.fire('onBeforeNavigate', { tabId: 5, frameId: 0, url: NEWS });
+  stopped.tabStatus = 'complete';
+  await stopped.timeOut();
+  assert.deepEqual(stopped.headers(1), ['User-Agent', 'Referer']);
+  assert.deepEqual(stopped.tabUpdates, []);
+
+  // The user went somewhere else in the same tab.
+  const replaced = crawlerWorld();
+  await replaced.fire('onBeforeNavigate', { tabId: 5, frameId: 0, url: NEWS });
+  await replaced.fire('onBeforeNavigate', { tabId: 5, frameId: 0, url: 'https://unrelated.example/' });
+  assert.equal(replaced.waiting().length, 0);
+
+  // The tab was closed.
+  const closed = crawlerWorld();
+  await closed.fire('onBeforeNavigate', { tabId: 5, frameId: 0, url: NEWS });
+  await closed.fire('onRemoved', 5);
+  assert.equal(closed.waiting().length, 0);
+
+  // The site answers and shows an article: fine with the user agent, and not watched again.
+  const fine = crawlerWorld();
+  await fine.load(5, NEWS);
+  assert.deepEqual(fine.headers(1), ['User-Agent', 'Referer']);
+  assert.deepEqual(fine.tabUpdates, []);
+  assert.equal(fine.crawler.fine['example-news.com'], true);
+  await fine.fire('onBeforeNavigate', { tabId: 5, frameId: 0, url: NEWS });
+  assert.equal(fine.waiting().length, 0);
+
+  // Frames inside a page, and sites without a crawler rule, are not watched.
+  const other = crawlerWorld();
+  await other.fire('onBeforeNavigate', { tabId: 5, frameId: 3, url: NEWS });
+  await other.fire('onBeforeNavigate', { tabId: 6, frameId: 0, url: 'https://unrelated.example/' });
+  await other.fire('onBeforeNavigate', { tabId: 7, frameId: 0, url: 'https://example-news.com.evil.example/' });
+  assert.equal(other.waiting().length, 0);
+});
+
+test('crawler: nothing is watched while Safari accepts X-Forwarded-For', async () => {
+  const world = crawlerWorld({ stored: {} });
+  await world.fire('onBeforeNavigate', { tabId: 5, frameId: 0, url: NEWS });
+  assert.equal(world.waiting().length, 0);
+  world.page = DENIAL_PAGE;
+  await world.load(5, NEWS);
+  assert.deepEqual(world.headers(1), ['User-Agent', 'Referer']);
+  assert.deepEqual(world.tabUpdates, []);
+});
+
+test('crawler: the second time a site does it, it is remembered for a month', async () => {
+  const day = 24 * 3600 * 1000;
+  // Found once before; that day is over, so the user agent is being sent again.
+  const stored = { ...XFF_REFUSED, bpc_safari_crawler: { refusedBy: { 'example-news.com': { reason: 'no answer within 12 s', since: '2026-11-01T00:00:00.000Z', until: Date.now() - 2 * day, times: 1 } }, cleared: {} } };
+  const world = crawlerWorld({ stored });
+  await world.fire('onBeforeNavigate', { tabId: 5, frameId: 0, url: NEWS });
+  assert.equal(world.waiting().length, 1, 'watched again after the day is over');
+  await world.timeOut();
+  await world.load(5, NEWS);
+  const entry = world.crawler.refusedBy['example-news.com'];
+  assert.equal(entry.times, 2);
+  assert.ok(Math.abs(entry.until - (Date.now() + 30 * day)) < 60000);
+
+  // A remembered site is not sent the user agent when the rules are next built.
+  const later = crawlerWorld({ stored: world.stored, rules: [] });
+  await later.bpcSafari.updateSessionRules({ addRules: [crawlerRule(1, 'example-news.com'), crawlerRule(2, 'other-news.com'), crawlerRule(3, 'washingtonpost.com')] });
+  assert.deepEqual(later.headers(1), ['Referer']);
+  assert.deepEqual(later.headers(2), ['User-Agent', 'Referer']);
+  assert.deepEqual(later.headers(3), ['Referer'], 'washingtonpost.com is known from the start');
+});
+
+test('crawler: what reads like a denial and what does not', () => {
+  const { crawler } = crawlerWorld();
+  for (const page of [
+    DENIAL_PAGE,
+    { title: '403 Forbidden', length: 30, text: 'nginx' },
+    { title: 'Just a moment...', length: 80, text: 'Checking your browser before accessing the site.' },
+    { title: 'example.com', length: 200, text: 'Please verify you are a human to continue.' },
+    { title: '', length: 90, text: 'Your request was blocked. Reference #18.2f3a' },
+  ]) assert.equal(crawler.looksDenied(page), true, JSON.stringify(page));
+  for (const page of [
+    ARTICLE_PAGE,
+    { title: 'Access denied to protesters at city hall', length: 9000, text: 'A long article ...' },
+    { title: 'Short page', length: 300, text: 'Subscribe to read the rest of this story.' },
+    null,
+    { title: 'x' },
+  ]) assert.equal(crawler.looksDenied(page), false, JSON.stringify(page));
+  assert.equal(crawler.ruleDomain(crawlerRule(1, 'Example-News.com')), 'example-news.com');
+  assert.equal(crawler.ruleDomain({ condition: { requestDomains: ['a.example'] } }), 'a.example');
+  assert.equal(crawler.ruleDomain({ condition: { regexFilter: 'x' } }), '');
+});
+
+test('crawler: the diagnostics name the sites that get no crawler user agent', async () => {
+  const world = crawlerWorld();
+  await world.bpcSafari.updateSessionRules({ addRules: [crawlerRule(3, 'washingtonpost.com')] });
+  const info = world.bpcSafari._diagnostics('https://www.washingtonpost.com/world/2026/article/');
+  assert.deepEqual([...info.crawlerRefusedBy], ['washingtonpost.com']);
+  assert.equal(info.siteRefusesCrawler, true);
+  assert.equal(world.bpcSafari._diagnostics('https://www.example-news.com/').siteRefusesCrawler, false);
+});

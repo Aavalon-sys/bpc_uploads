@@ -39,6 +39,11 @@ const inexpressible = (rule) => rule.action.type === 'modifyHeaders' && !accepte
 // The refused headers the extension's rules use: X-Forwarded-For (Googlebot and
 // random-IP rules) and the app headers of two sites.
 const REFUSED_HEADERS = ['app-identifier', 'device-type', 'ismobileapp', 'platform', 'renderingkind', 'x-access-token', 'x-forwarded-for'];
+// Sites known to refuse a Googlebot user agent that does not come from Google's
+// address, which Safari cannot fake: their rule goes without the user agent.
+const CRAWLER_REFUSED_BY = ['washingtonpost.com'];
+const ruleDomain = (rule) => (/^\|\|([a-z0-9.-]+)/.exec(rule.condition.urlFilter || '') || [])[1] || '';
+const isCrawlerUA = (h) => h.header === 'User-Agent' && /Googlebot/.test(h.value || '');
 // Every rejected update must be about a refused header name, nothing else.
 const onlyHeaderRefusals = (dnrErrors) => dnrErrors.flat().every((p) => /The header `[^`]+` is not recognized/.test(p));
 
@@ -149,6 +154,9 @@ for (const version of [[16, 4], [17, 0], [18, 4], [26, 0]]) {
     assert.ok(googlebot.length > 30, `${googlebot.length} Googlebot rules`);
     for (const r of googlebot)
       assert.deepEqual(r.action.requestHeaders.map((h) => h.header).filter((h) => h !== 'Cookie'), ['User-Agent', 'Referer'], `headers of rule ${r.id}`);
+    // ... except for the sites known to refuse it.
+    assert.deepEqual(googlebot.filter((r) => CRAWLER_REFUSED_BY.includes(ruleDomain(r))), []);
+    assert.ok(chromeRun.sessionRules.some((r) => ruleDomain(r) === 'washingtonpost.com' && (r.action.requestHeaders || []).some(isCrawlerUA)), 'the Chrome release has a Googlebot rule for washingtonpost.com');
     assert.equal(addCall.rulesOut, run.sessionRules.length);
 
     // Same matching behaviour: rewritten regexes accept exactly the same URLs.
@@ -163,13 +171,19 @@ for (const version of [[16, 4], [17, 0], [18, 4], [26, 0]]) {
         if (c.excludedInitiatorDomains && !c.excludedInitiatorDomains.length) delete c.excludedInitiatorDomains;
         return c;
       };
-      // Same action, apart from the request headers Safari refuses.
+      // Same action, apart from the request headers Safari refuses and the
+      // Googlebot user agent for the sites that refuse it without the address.
+      const noCrawler = CRAWLER_REFUSED_BY.includes(ruleDomain(orig));
       const action = (r) => {
         const a = structuredClone(r.action);
         delete a.responseHeaders;
-        if (a.requestHeaders) a.requestHeaders = a.requestHeaders.filter((h) => !refused(h));
+        if (a.requestHeaders) a.requestHeaders = a.requestHeaders.filter((h) => !refused(h) && !(noCrawler && isCrawlerUA(h)));
         return a;
       };
+      if (noCrawler && (orig.action.requestHeaders || []).some(isCrawlerUA)) {
+        for (const r of rules)
+          assert.deepEqual(r.action.requestHeaders.map((h) => h.header), ['Referer'], `rule ${r.id} for ${ruleDomain(orig)} must not claim to be a crawler`);
+      }
       for (const r of rules) {
         assert.deepEqual(strip(r), strip(orig), `condition of rule ${r.id}`);
         assert.deepEqual(action(r), action(orig), `action of rule ${r.id}`);

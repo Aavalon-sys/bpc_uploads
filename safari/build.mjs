@@ -256,6 +256,10 @@ function transformManifest(manifest) {
   // user granted; plain declarativeNetRequest lets block rules work without it
   // (header rules and content scripts still need site access in Safari).
   if (!m.permissions.includes('declarativeNetRequest')) m.permissions.push('declarativeNetRequest');
+  // Lets the compat layer see a navigation that gets no answer: a site that
+  // refuses the Googlebot user agent Safari cannot back up with Googlebot's
+  // address (see "Finding the sites that refuse a crawler" in safari-compat.js).
+  if (!m.permissions.includes('webNavigation')) m.permissions.push('webNavigation');
   // Safari always opens the options page in a tab and flags this key as unsupported.
   if (m.options_ui) delete m.options_ui.open_in_tab;
   m.action = { ...(m.action || {}), default_icon: { 128: 'bypass.png' } };

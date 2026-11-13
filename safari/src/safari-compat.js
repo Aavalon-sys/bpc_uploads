@@ -39,6 +39,10 @@
  *  - Earlier Safari builds stored site names with accented letters garbled,
  *    after which the options page disabled those sites:
  *    bpcSafari.repairSiteNames() puts such a stored list right.
+ *  - Without X-Forwarded-For, a Googlebot rule claims to be Googlebot from an
+ *    address that is not Google's. Sites that answer that with nothing or with
+ *    a denial (washingtonpost.com) get the rule without its User-Agent; such
+ *    sites are found as they are visited.
  */
 (function (root) {
   'use strict';
@@ -552,6 +556,7 @@
     lastCall: null,
     lastAddCall: null, // last call that added rules
     errors: [], // uncaught errors of the background page (see recordError)
+    crawler: [], // what happened to the crawler user agent of which site (see crawlerNote)
   };
 
   // Uncaught errors and rejections in the background page (this script runs
@@ -632,6 +637,11 @@
     } catch (e) {
       info.error = String(e && e.message || e);
     }
+    // Sites that get no crawler user agent because Safari cannot send the crawler's address with it.
+    info.crawlerRefusedBy = Object.keys(crawlerRefusedBy).filter(crawlerRefused);
+    info.crawlerNotes = report.crawler.slice(-10);
+    var host = hostOf(url);
+    info.siteRefusesCrawler = !!host && !!refusedHeaders['x-forwarded-for'] && info.crawlerRefusedBy.some(function (domain) { return onSite(host, domain); });
     return info;
   }
 
@@ -656,13 +666,55 @@
   // update for any other ("The header `X-Forwarded-For` is not recognized.").
   var refusedHeaders = {};
 
-  // Removes the refused headers from a modifyHeaders rule, in place.
+  // --- A crawler's user agent without the crawler's address -----------------
+  //
+  // The Googlebot rules of the extension set three request headers: the
+  // User-Agent of Googlebot, a Google Referer and X-Forwarded-For with an
+  // address of Google's crawler. Safari refuses X-Forwarded-For, which leaves
+  // a request that claims to be Googlebot but does not come from Google. Some
+  // sites answer such a request with nothing at all (the page never loads, as
+  // on washingtonpost.com) or with a denial page. For those sites the rule is
+  // better off without the User-Agent: the page opens, and the other measures
+  // for the site (blocked scripts, Referer, content script) still apply.
+  //
+  // Which sites do this is found out as it happens (see "Finding the sites
+  // that refuse a crawler" below); the ones already known are listed here.
+  var CRAWLER_UA = /Googlebot/i;
+  var CRAWLER_REFUSED_BY = ['washingtonpost.com'];
+  // domain -> {reason, since, until, times}: no crawler User-Agent for this
+  // site until `until` (0: for good).
+  var crawlerRefusedBy = {};
+  CRAWLER_REFUSED_BY.forEach(function (domain) {
+    crawlerRefusedBy[domain] = { reason: 'known', since: '', until: 0, times: 0 };
+  });
+
+  function isCrawlerHeader(h) {
+    return !!h && String(h.header).toLowerCase() === 'user-agent' && CRAWLER_UA.test(String(h.value || ''));
+  }
+
+  // The site a header rule is for: "||example.com", or its first request domain.
+  function ruleDomain(rule) {
+    var c = (rule && rule.condition) || {};
+    var m = /^\|\|([a-z0-9.-]+)/i.exec(String(c.urlFilter || ''));
+    if (m) return m[1].toLowerCase();
+    return Array.isArray(c.requestDomains) && c.requestDomains.length ? String(c.requestDomains[0]).toLowerCase() : '';
+  }
+
+  function crawlerRefused(domain) {
+    var entry = Object.prototype.hasOwnProperty.call(crawlerRefusedBy, domain) ? crawlerRefusedBy[domain] : null;
+    return !!entry && (!entry.until || entry.until > Date.now());
+  }
+
+  // Removes the refused headers from a modifyHeaders rule, in place, and with
+  // X-Forwarded-For the User-Agent of a crawler for the sites that refuse it.
   // Returns the number of request headers left.
   function withoutRefusedHeaders(rule) {
     var headers = rule.action.requestHeaders || [];
     var kept = headers.filter(function (h) {
       return !refusedHeaders[String(h && h.header).toLowerCase()];
     });
+    if (refusedHeaders['x-forwarded-for'] && kept.some(isCrawlerHeader) && crawlerRefused(ruleDomain(rule)))
+      kept = kept.filter(function (h) { return !isCrawlerHeader(h); });
     if (kept.length !== headers.length) rule.action.requestHeaders = kept;
     return kept.length;
   }
@@ -731,11 +783,29 @@
     return (rule.action && rule.action.type) + '|' + parts.join('|');
   }
 
+  // Sites found to refuse a crawler's User-Agent, and sites cleared of it.
+  var CRAWLER_KEY = 'bpc_safari_crawler';
+  var DAY_MS = 24 * 3600 * 1000;
+  // domain -> time: the site failed with and without the User-Agent, so the
+  // User-Agent is not the reason; not examined again for a week.
+  var crawlerCleared = {};
+
   function loadRefused() {
     if (!refusedLoaded) {
       refusedLoaded = Promise.resolve().then(function () {
-        return api.storage.local.get([REFUSED_KEY]);
+        return api.storage.local.get([REFUSED_KEY, CRAWLER_KEY]);
       }).then(function (items) {
+        var crawler = (items && items[CRAWLER_KEY]) || {};
+        var now = Date.now();
+        Object.keys(crawler.refusedBy || {}).forEach(function (domain) {
+          var entry = crawler.refusedBy[domain];
+          // An entry past its time stays for a while: it says how often the site did this.
+          if (crawlerRefusedBy[domain] || !entry || (entry.until && entry.until < now - 90 * DAY_MS)) return;
+          crawlerRefusedBy[domain] = { reason: String(entry.reason || ''), since: String(entry.since || ''), until: Number(entry.until) || 0, times: Number(entry.times) || 0 };
+        });
+        Object.keys(crawler.cleared || {}).forEach(function (domain) {
+          if (now - crawler.cleared[domain] < 7 * DAY_MS) crawlerCleared[domain] = crawler.cleared[domain];
+        });
         var saved = items && items[REFUSED_KEY];
         if (!saved || saved.safari !== String(version)) return;
         (saved.rules || []).forEach(function (key) { refusedRules[key] = true; });
@@ -743,6 +813,22 @@
       }).catch(function () {});
     }
     return refusedLoaded;
+  }
+
+  function saveCrawler() {
+    try {
+      var found = {};
+      Object.keys(crawlerRefusedBy).forEach(function (domain) {
+        var entry = crawlerRefusedBy[domain];
+        if (entry.reason !== 'known' && !entry.tentative) found[domain] = entry;
+      });
+      var record = {};
+      record[CRAWLER_KEY] = { refusedBy: found, cleared: crawlerCleared };
+      var p = api.storage.local.set(record);
+      if (p && typeof p.catch === 'function') p.catch(function () {});
+    } catch (e) {
+      // best effort
+    }
   }
 
   function saveRefused() {
@@ -924,6 +1010,7 @@
       });
       var knownBefore = Object.keys(refusedRules).length + Object.keys(refusedHeaders).length;
       return applyBatch(out, removeRuleIds, result).then(function () {
+        crawlerDomainsCache = null;
         if (Object.keys(refusedRules).length + Object.keys(refusedHeaders).length !== knownBefore) saveRefused();
         report.calls++;
         report.lastCall = result;
@@ -954,6 +1041,244 @@
       console.error('BPC Safari: updateSessionRules failed', err);
       if (typeof callback === 'function') callback();
     });
+  }
+
+  // --- Finding the sites that refuse a crawler --------------------------------
+  //
+  // Only while Safari refuses X-Forwarded-For (see "A crawler's user agent
+  // without the crawler's address" above). A main-frame navigation to a site
+  // with a Googlebot rule is watched:
+  //  - no answer within STALL_MS while the tab is still loading, or
+  //  - the load ends on a short page that reads like a denial,
+  // and the rule loses its User-Agent and the navigation is repeated once. If
+  // the repeated load works, the site is remembered: for a day the first
+  // time, for a month from the second time on (a network hiccup can look the
+  // same once). If it fails the same way, the User-Agent was not the reason:
+  // it comes back and the site is left alone for a week.
+  var STALL_MS = 12000;
+  var crawlerDomainsCache = null; // promise of the domains with a crawler rule installed
+  var crawlerRulesTaken = {};     // domain -> the rules as they were with the User-Agent
+  var crawlerFine = {};           // domain -> true: loaded with the User-Agent since this page started
+  var navigations = {};           // tabId -> the main-frame navigation under way
+  var repeats = {};               // tabId -> domain whose navigation is being repeated
+
+  function hostOf(url) {
+    var m = /^https?:\/\/([^\/?#:]+)/i.exec(String(url || ''));
+    return m ? m[1].toLowerCase() : '';
+  }
+
+  function onSite(host, domain) {
+    return host === domain || host.slice(-domain.length - 1) === '.' + domain;
+  }
+
+  function crawlerDomains() {
+    if (!crawlerDomainsCache) {
+      crawlerDomainsCache = callDnr('getSessionRules').then(function (rules) {
+        var domains = {};
+        (rules || []).forEach(function (rule) {
+          var headers = rule.action && rule.action.type === 'modifyHeaders' && rule.action.requestHeaders;
+          if (headers && headers.some(isCrawlerHeader) && ruleDomain(rule)) domains[ruleDomain(rule)] = true;
+        });
+        return Object.keys(domains);
+      }).catch(function () {
+        crawlerDomainsCache = null;
+        return [];
+      });
+    }
+    return crawlerDomainsCache;
+  }
+
+  // The site with a crawler rule that `url` belongs to, or ''.
+  function crawlerDomainFor(url, repeated) {
+    var host = hostOf(url);
+    if (!host || !dnr) return Promise.resolve('');
+    return loadRefused().then(function () {
+      if (!refusedHeaders['x-forwarded-for']) return '';
+      if (repeated && onSite(host, repeated)) return repeated;
+      return crawlerDomains().then(function (domains) {
+        for (var k = 0; k < domains.length; k++)
+          if (onSite(host, domains[k])) return domains[k];
+        return '';
+      });
+    }).catch(function () {
+      return '';
+    });
+  }
+
+  // Takes the crawler's User-Agent out of the installed rules for a site
+  // (send: false), or puts the rules back as they were (send: true).
+  function setCrawlerIdentity(domain, send) {
+    var run = queue.then(function () {
+      return callDnr('getSessionRules');
+    }).then(function (rules) {
+      var remove = [];
+      var add = [];
+      if (send) {
+        (crawlerRulesTaken[domain] || []).forEach(function (original) {
+          remove.push(original.id);
+          add.push(original);
+        });
+        delete crawlerRulesTaken[domain];
+      } else {
+        var originals = [];
+        (rules || []).forEach(function (rule) {
+          var headers = rule.action && rule.action.type === 'modifyHeaders' && rule.action.requestHeaders;
+          if (!headers || !headers.some(isCrawlerHeader) || ruleDomain(rule) !== domain) return;
+          originals.push(clone(rule));
+          remove.push(rule.id);
+          var changed = clone(rule);
+          changed.action.requestHeaders = headers.filter(function (h) { return !isCrawlerHeader(h); });
+          if (changed.action.requestHeaders.length) add.push(changed);
+        });
+        if (originals.length) crawlerRulesTaken[domain] = originals;
+      }
+      crawlerDomainsCache = null;
+      if (!remove.length) return false;
+      return callDnr('updateSessionRules', { removeRuleIds: remove, addRules: add }).then(function () { return true; });
+    });
+    queue = run.catch(function () {});
+    return run.catch(function (e) {
+      recordError('crawler identity for ' + domain + ': ' + (e && e.message || e));
+      return false;
+    });
+  }
+
+  function forgetNavigation(tabId) {
+    var nav = navigations[tabId];
+    if (nav) clearTimeout(nav.timer);
+    delete navigations[tabId];
+  }
+
+  // Runs in the page: enough of it to tell a denial from an article.
+  function pageSummary() {
+    var text = (document.body && document.body.innerText) || '';
+    return { title: String(document.title || ''), length: text.length, text: text.slice(0, 400) };
+  }
+
+  function looksDenied(page) {
+    if (!page || typeof page.length !== 'number' || page.length > 1500) return false;
+    return /access (is |was )?denied|forbidden|\b40[136]\b|\b429\b|request (was )?blocked|been blocked|unusual traffic|not a robot|captcha|verify (that )?you are (a )?human|just a moment|pardon our interruption|request unsuccessful|automated (access|requests)|bot detected/i
+      .test(page.title + ' ' + page.text);
+  }
+
+  function crawlerNote(domain, text) {
+    report.crawler.push({ at: new Date().toISOString(), domain: domain, note: text });
+    if (report.crawler.length > 30) report.crawler.shift();
+    console.info('BPC Safari: ' + domain + ': ' + text);
+  }
+
+  // The navigation got no answer, or a denial.
+  function crawlerFailed(tabId, nav, reason) {
+    forgetNavigation(tabId);
+    var domain = nav.domain;
+    var entry = crawlerRefusedBy[domain];
+    if (nav.repeated) {
+      // No better without the User-Agent: it was not the reason.
+      if (entry && entry.tentative) {
+        if (entry.times) {
+          delete entry.tentative;
+          entry.until = 1; // past its time; kept for the count
+        } else delete crawlerRefusedBy[domain];
+      }
+      crawlerCleared[domain] = Date.now();
+      saveCrawler();
+      crawlerNote(domain, 'also fails without the crawler user agent (' + reason + '); sending it again');
+      return setCrawlerIdentity(domain, true);
+    }
+    crawlerRefusedBy[domain] = { reason: reason, since: new Date().toISOString(), until: Date.now() + 5 * 60000, times: (entry && entry.times) || 0, tentative: true };
+    crawlerNote(domain, reason + ' with the crawler user agent; trying again without it');
+    return setCrawlerIdentity(domain, false).then(function () {
+      repeats[tabId] = domain;
+      return api.tabs.update(tabId, { url: nav.url });
+    }).catch(function (e) {
+      recordError('repeating the navigation to ' + domain + ': ' + (e && e.message || e));
+    });
+  }
+
+  // The navigation ended on a page that is not a denial.
+  function crawlerLoaded(nav) {
+    var domain = nav.domain;
+    var entry = crawlerRefusedBy[domain];
+    if (!nav.repeated) {
+      crawlerFine[domain] = true;
+      return;
+    }
+    if (!entry || !entry.tentative) return;
+    delete entry.tentative;
+    entry.times++;
+    entry.until = Date.now() + (entry.times >= 2 ? 30 : 1) * DAY_MS;
+    saveCrawler();
+    crawlerNote(domain, 'loads without the crawler user agent; not sending it for ' + (entry.times >= 2 ? '30 days' : 'a day'));
+  }
+
+  function inspectPage(tabId, nav) {
+    forgetNavigation(tabId);
+    return Promise.resolve().then(function () {
+      return api.scripting.executeScript({ target: { tabId: tabId }, func: pageSummary });
+    }).then(function (results) {
+      var page = results && results[0] && results[0].result;
+      if (looksDenied(page)) return crawlerFailed(tabId, nav, 'denied ("' + String(page.title).slice(0, 60) + '")');
+      return crawlerLoaded(nav);
+    }, function () {
+      // The page cannot be looked at; a repeated load that got this far counts as loaded.
+      if (nav.repeated) crawlerLoaded(nav);
+    });
+  }
+
+  function stalled(tabId, nav) {
+    if (navigations[tabId] !== nav || nav.committed) return undefined;
+    // A load that ended without an answer (an error, or the user stopped it) is left alone.
+    return Promise.resolve().then(function () {
+      return api.tabs.get(tabId);
+    }).then(function (tab) {
+      if (navigations[tabId] !== nav || nav.committed) return undefined;
+      if (!tab || tab.status !== 'loading') return forgetNavigation(tabId);
+      return crawlerFailed(tabId, nav, 'no answer within ' + Math.round(STALL_MS / 1000) + ' s');
+    }, function () {
+      forgetNavigation(tabId);
+    });
+  }
+
+  function onBeforeNavigate(details) {
+    if (!details || details.frameId !== 0) return;
+    var tabId = details.tabId;
+    forgetNavigation(tabId);
+    var repeated = repeats[tabId];
+    delete repeats[tabId];
+    var nav = navigations[tabId] = { url: details.url, domain: '', repeated: false, committed: false, completed: false, timer: null };
+    crawlerDomainFor(details.url, repeated).then(function (domain) {
+      if (navigations[tabId] !== nav) return;
+      nav.domain = domain;
+      nav.repeated = !!domain && domain === repeated;
+      if (!domain || (!nav.repeated && (crawlerFine[domain] || crawlerCleared[domain] || crawlerRefused(domain)))) {
+        forgetNavigation(tabId);
+        return;
+      }
+      if (nav.completed) inspectPage(tabId, nav);
+      else if (!nav.committed) nav.timer = setTimeout(function () { stalled(tabId, nav); }, STALL_MS);
+    });
+  }
+
+  function onCommitted(details) {
+    var nav = details && details.frameId === 0 ? navigations[details.tabId] : null;
+    if (!nav) return;
+    nav.committed = true;
+    clearTimeout(nav.timer);
+  }
+
+  function onCompleted(details) {
+    var nav = details && details.frameId === 0 ? navigations[details.tabId] : null;
+    if (!nav) return;
+    nav.committed = nav.completed = true;
+    clearTimeout(nav.timer);
+    if (nav.domain) inspectPage(details.tabId, nav);
+  }
+
+  if (api && api.webNavigation && api.webNavigation.onBeforeNavigate && api.webNavigation.onCommitted && api.webNavigation.onCompleted) {
+    api.webNavigation.onBeforeNavigate.addListener(onBeforeNavigate);
+    api.webNavigation.onCommitted.addListener(onCommitted);
+    api.webNavigation.onCompleted.addListener(onCompleted);
+    if (api.tabs && api.tabs.onRemoved) api.tabs.onRemoved.addListener(forgetNavigation);
   }
 
   function getSelf(callback) {
@@ -1148,6 +1473,7 @@
     openOptionsPage: openOptionsPage,
     report: report,
     // exposed for tests
+    _crawler: { refusedBy: crawlerRefusedBy, cleared: crawlerCleared, fine: crawlerFine, navigations: navigations, looksDenied: looksDenied, ruleDomain: ruleDomain, STALL_MS: STALL_MS },
     _diagnostics: diagnostics,
     _isMarker: isMarker,
     _MARKER_ID: MARKER_ID,
