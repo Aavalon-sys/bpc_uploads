@@ -148,16 +148,21 @@ Safari 默认不允许扩展访问任何网站。没有授权的网站上，Safa
 | Safari 启动时首次加载的扩展收不到安装事件，而每次重新启用扩展又会重复收到 | 首次设置（启用默认站点）改为每个 Safari 配置只做一次，不依赖这个事件 |
 | 已发布的 Safari 把后台脚本当成 Latin-1 读取，非 ASCII 字符变成乱码 | 构建时把所有脚本里的非 ASCII 字符写成 `\uXXXX` 转义，脚本本身是纯 ASCII，按哪种编码读都一样 |
 | 有十几个站点的脚本要注入到网页自己的 JavaScript 环境（`world: "MAIN"`），那里 Safari 没有 `chrome` 对象，脚本第一行就报错 | 这些脚本在找不到 `chrome` / `browser` 时改用空对象，行为与 Chrome 的网页环境一致 |
+| 去掉 `X-Forwarded-For` 之后，伪装 Googlebot 的请求「自称 Googlebot、却不是从 Google 的地址发出」，有的网站对这种请求干脆不回应，页面永远打不开（washingtonpost.com 就是这样） | 对这类网站不再伪装成 Googlebot，规则的其余部分照常生效。已知的网站预先列出；其他网站在访问时自动发现：页面 12 秒没有任何回应、或者打开的是一个「拒绝访问」的短页面时，去掉伪装再加载一次，成功了就记住这个网站（见下方「已知限制」） |
 | Safari 不支持修改响应头（`responseHeaders`） | 跳过这类规则（见下方「已知限制」） |
 | Chrome 版的 DOMPurify 是空实现 | 换成 Firefox 版发布包里的真实 DOMPurify |
 | Apple 的转换工具每次都生成版本 1.0 (1) 的 App | 用扩展的版本号和递增的构建号，新的 App 一定比旧的「新」 |
 
-以当前版本 4.4.8.4 为例：启用全部默认站点时，Chrome 版生成 770 条规则；Safari 版实际装上 1080 条（其中 220 条正则规则被改写拆分），外加 1 条用于检查的标记规则，跳过 29 条。
+以当前版本 4.4.9.3 为例：启用全部默认站点时，Chrome 版生成 728 条规则；Safari 版实际装上 1031 条（其中 204 条正则规则被改写拆分），外加 1 条用于检查的标记规则，跳过 30 条。
 
 ## 已知限制
 
-- **28 个站点无法屏蔽内联脚本**：Chrome 版通过修改响应头注入 CSP 来屏蔽这些站点的内联脚本，Safari 不支持这种做法。这些站点的其他规则照常生效，但效果可能不如 Chrome。涉及的站点：cleveland.com、lehighvalleylive.com、mlive.com、nj.com、pennlive.com、silive.com、syracuse.com、anandabazar.com、freitag.de、dwell.com、elpais.com、lastampa.it、inews.co.uk、topagrar.com、nd.nl、ogj.com、revistaoeste.com、rugbypass.com、straitstimes.com、telegram.hr、bizjournals.com、epoch.org.il、independent.co.uk、the-independent.com、theintercept.com、timesofindia.indiatimes.com、vn.at、ynet.co.il
-- **不能伪造来源 IP 和 App 请求头**：Safari 不允许扩展设置 `X-Forwarded-For`。伪装 Googlebot 的 60 条规则在 Safari 上只是少了这一项（User-Agent 和 Referer 照常发送），大多数网站不受影响；nationalgeographic.com 那条只设置 `X-Forwarded-For` 的规则被整条跳过。haaretz.com、haaretz.co.il、themarker.com 和 New York Post（nypost.djservices.io）的规则依赖手机 App 的自定义请求头，这一部分在 Safari 上不生效。
+- **29 个站点无法屏蔽内联脚本**：Chrome 版通过修改响应头注入 CSP 来屏蔽这些站点的内联脚本，Safari 不支持这种做法。这些站点的其他规则照常生效，但效果可能不如 Chrome。涉及的站点：cleveland.com、lehighvalleylive.com、mlive.com、nj.com、pennlive.com、silive.com、syracuse.com、anandabazar.com、businessdesk.co.nz、challenges.fr、freitag.de、dwell.com、elpais.com、lastampa.it、inews.co.uk、topagrar.com、ogj.com、revistaoeste.com、rugbypass.com、straitstimes.com、telegram.hr、bizjournals.com、epoch.org.il、independent.co.uk、the-independent.com、theintercept.com、timesofindia.indiatimes.com、vn.at、ynet.co.il
+- **不能伪造来源 IP，所以伪装 Googlebot 的效果比 Chrome 弱**：Chrome 版对 50 个站点同时发送 Googlebot 的 User-Agent 和带有 Google 爬虫地址的 `X-Forwarded-For`。Safari 不允许扩展设置 `X-Forwarded-For`，所以：
+  - 只看 User-Agent 的网站不受影响，和 Chrome 版一样；
+  - 会核对来源地址的网站把这种请求当成假爬虫，有的直接不回应。对这些网站，Safari 版不再伪装成 Googlebot：页面能正常打开，屏蔽脚本、Referer、内容脚本照常生效，但**付费墙不一定能绕过**。目前已知的是 washingtonpost.com；其他网站由扩展在访问时自动发现（第一次会多等最多 12 秒，然后自动重新加载），「Safari 诊断」页会列出这些网站；
+  - nationalgeographic.com 那条只设置 `X-Forwarded-For` 的规则被整条跳过。
+- **不能发送 App 请求头**：haaretz.com、haaretz.co.il、themarker.com 和 New York Post（nypost.djservices.io）的规则依赖手机 App 的自定义请求头，这一部分在 Safari 上不生效。
 - **不会自动更新扩展本身**：上游发布新版后，需要更新仓库里的发布包并重新构建。弹窗里的「有新版本」提示链接的是 Chrome 版下载页。如果在选项里开启了在线更新站点规则，站点规则仍会从 gitflic 更新。
 - Safari 18 以前，扩展无法读取或删除 HttpOnly Cookie。
 - 无痕浏览模式下，Safari 只支持 spanning 模式（Chrome 版用的是 split），并且需要在 Safari 扩展设置里单独允许无痕浏览。
@@ -166,8 +171,8 @@ Safari 默认不允许扩展访问任何网站。没有授权的网站上，Safa
 ## 验证清单（第一次安装后）
 
 1. 确认已按第 3 节授权网站访问
-2. 在一个支持的新闻网站上打开「Safari 诊断」，结论里应该是「扩展的脚本已注入到当前页面」，详细信息里 `session rules` 的 `total` 应该在 1000 以上（启用全部默认站点时是 1080）
-3. （macOS，可选）Safari 开发 菜单 → Web Extension Background Content → Bypass Paywalls Clean，打开后台页的 Web 检查器。控制台里应该能看到一行 `BPC Safari: 770 rules requested, 1080 applied (...)`（4.4.8.4 启用全部默认站点时的数字，随版本和启用的站点变化）；执行 `bpcSafari.report.lastAddCall.droppedRules` 可以查看具体跳过了哪些规则
+2. 在一个支持的新闻网站上打开「Safari 诊断」，结论里应该是「扩展的脚本已注入到当前页面」，详细信息里 `session rules` 的 `total` 应该在 1000 左右（4.4.9.3 启用全部默认站点时是 1031）
+3. （macOS，可选）Safari 开发 菜单 → Web Extension Background Content → Bypass Paywalls Clean，打开后台页的 Web 检查器。控制台里应该能看到一行 `BPC Safari: 728 rules requested, 1031 applied (...)`（4.4.9.3 启用全部默认站点时的数字，随版本和启用的站点变化）；执行 `bpcSafari.report.lastAddCall.droppedRules` 可以查看具体跳过了哪些规则
 
 ## 测试
 
@@ -185,6 +190,7 @@ node --test --test-concurrency=1 safari/test/*.test.mjs
 - 切换站点后不留下残余的改写规则；
 - 有网站权限时，内容脚本的注入和 Chrome 版完全一致；没有权限时（Safari 给的网址为空）不会注入；
 - 上面「早期版本为什么不起作用」里的四种 Safari 行为：被拒的请求头、被悄悄回滚的更新、没有安装事件、后台脚本按 Latin-1 读取；
+- 网站拒绝「假 Googlebot」时的处理：无回应或被拒 → 去掉伪装重试 → 成功则记住，仍失败则恢复；用户自己中止的加载不受影响；
 - 旧版本留下的站点列表（乱码的名称、被停用的站点）会被修正，用户自己精简过的列表保持不变；
 - 注入网页环境的脚本在没有 `chrome` 对象的页面里能正常启动；
 - 诊断页在「没有网站权限」「一切正常」「后台没有响应」等情况下给出正确的结论。
@@ -205,7 +211,8 @@ GitHub Actions 的「Safari engine test」工作流在每次改动后自动运�
 - 扩展自己以为装上的规则数和 WebKit 里实际存在的规则数一致；
 - 没有网站权限时、在无痕窗口里，页面完全不受影响；不受支持的网站完全不受影响；
 - 扩展在「Safari 运行中启用」和「随 Safari 启动加载」两种情况下结果相同；
-- 后台页空闲 30 秒被 WebKit 卸载之后，下一次打开文章能把它唤醒，规则和内容脚本照常生效。
+- 后台页空闲 30 秒被 WebKit 卸载之后，下一次打开文章能把它唤醒，规则和内容脚本照常生效；
+- 对「拒绝假 Googlebot」的替身网站：已知的那个从不收到 Googlebot 的 User-Agent；另外两个（一个不回应、一个返回拒绝页面）被扩展自动发现，去掉伪装后重新加载成功，并被记住。
 
 测试页面由本机的代理提供（`safari/engine/server.mjs`），不会访问真实的网站。机器上的 Safari 比系统新时（Safari 自带一份更新的 WebKit），主要场景会用那份 WebKit 再跑一遍。
 
@@ -218,7 +225,7 @@ safari/engine/safari-app.sh
 引擎测试里，标签页、窗口和权限是测试程序自己模拟的。这个测试则让 Safari 应用本身通过 WebDriver（`safaridriver`，需要 Safari 18.4 以上）加载构建好的扩展，标签页、事件、权限对话框全部是 Safari 自己的：
 
 - Safari 弹出「想要访问 gitflic.ru」的对话框时，脚本像用户一样勾选复选框并点「始终允许」；
-- 然后依次打开同一批替身页面，检查服务器收到的请求头、被屏蔽的脚本、内容脚本对页面的修改；
+- 然后依次打开同一批替身页面，检查服务器收到的请求头、被屏蔽的脚本、内容脚本对页面的修改，包括那几个「拒绝假 Googlebot」的替身网站；
 - 空闲 40 秒（让 Safari 卸载后台页）后再打开两个页面，检查结果相同。
 
 WebDriver 只能看到网页，看不到扩展内部，所以这里检查的都是网页和服务器能看到的结果。脚本会临时修改机器的设置（信任测试证书、设置代理自动配置、退出并重启 Safari、通过辅助功能接口点击对话框），结束后恢复，**不要在自己日常使用的 Mac 上运行**。
