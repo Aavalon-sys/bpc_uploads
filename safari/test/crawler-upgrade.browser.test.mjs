@@ -52,6 +52,8 @@ const PAGES = {
     : `<div id="article-body" class="body teaser"><p>${sentence(1).replace('Paragraph', 'Teaser')}</p></div>${READERS}`),
   // Nothing to gain: the page already has everything.
   '/complete': () => `<article class="a">${paragraphs(1, 6)}</article>`,
+  // The short version is laid out differently; only what is around the article has the same name.
+  '/moved': (full) => `<main>${full ? `<div class="full-story">${paragraphs(1, 8)}</div>` : `<div class="teaser"><p>${sentence(1).replace('Paragraph', 'Teaser')}</p></div>`}</main>${READERS}`,
   // The copy has no element the page could be matched to.
   '/unrelated': (full) => (full ? `<div>${paragraphs(1, 9)}</div>` : `<section>${'<p>' + sentence(50) + '</p>'}</section>`),
   // The crawler is refused.
@@ -145,6 +147,37 @@ test('the article from the crawler\'s copy, in a browser', { skip: playwright ? 
     assert.equal(note.by, 'name');
     assert.deepEqual(await page.evaluate(SHOWN), [1, 2, 3, 4, 5, 6, 7, 8]);
     assert.equal(await page.evaluate(`getComputedStyle(document.querySelector('.teaser')).display`), 'none');
+  });
+
+  await t.test('only the surroundings match: more of the page is exchanged', async () => {
+    const page = await open('/moved');
+    const note = await upgrade(page);
+    assert.equal(note.outcome, 'article replaced', JSON.stringify(note));
+    assert.deepEqual([note.by, note.article, note.exchanged], ['surroundings', 'div.full-story', 'main']);
+    assert.deepEqual(await page.evaluate(SHOWN), [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.equal(await page.evaluate(`document.querySelector('.teaser').offsetParent`), null);
+    assert.equal(await page.evaluate(`document.querySelector('.readers').offsetParent !== null`), true);
+  });
+
+  await t.test('started before the page exists, the article is exchanged once the page is parsed', async () => {
+    const page = await browser.newPage();
+    // Like scripting.executeScript at the moment the answer arrives: no document yet.
+    await page.addInitScript(`window.__report = (${source})(${JSON.stringify(CONFIG)});`);
+    await page.goto(origin + '/wrapped');
+    const note = await page.evaluate('window.__report');
+    assert.equal(note.outcome, 'article replaced', JSON.stringify(note));
+    assert.deepEqual(await page.evaluate(SHOWN), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  });
+
+  await t.test('another article without a new document: the exchange is taken back and done anew', async () => {
+    const page = await open('/wrapped');
+    await upgrade(page);
+    assert.deepEqual(await page.evaluate(SHOWN), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    // The page's own navigation: new address, and its article element now holds the next article's beginning.
+    await page.evaluate(`history.pushState({}, '', '/plain'); document.querySelector('article').outerHTML = '<div id="story" class="story"><p data-n="1">${sentence(1)}</p><p data-n="2">${sentence(2)}</p></div>';`);
+    await page.waitForFunction(`document.documentElement.getAttribute('data-bpc-safari-crawler') === 'replaced' && document.querySelector('[data-bpc-safari-crawler="article"]#story')`, null, { timeout: 8000 });
+    assert.deepEqual(await page.evaluate(SHOWN), [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.equal(await page.evaluate(`document.querySelectorAll('[data-bpc-safari-crawler="article"]').length`), 1, 'the first article\'s copy is gone');
   });
 
   await t.test('the page\'s scripts undoing the change are undone', async () => {

@@ -1285,16 +1285,17 @@
   }
 
   function onCommitted(details) {
-    var nav = details && details.frameId === 0 ? navigations[details.tabId] : null;
+    if (!details || details.frameId !== 0) return;
+    // The answer has arrived: on a site without crawler User-Agent, ask for the crawler's copy.
+    upgradeFromCrawler(details.tabId, details.url);
+    var nav = navigations[details.tabId];
     if (!nav) return;
     nav.committed = true;
     clearTimeout(nav.timer);
   }
 
   function onCompleted(details) {
-    if (!details || details.frameId !== 0) return;
-    upgradeFromCrawler(details.tabId, details.url);
-    var nav = navigations[details.tabId];
+    var nav = details && details.frameId === 0 ? navigations[details.tabId] : null;
     if (!nav) return;
     nav.committed = nav.completed = true;
     clearTimeout(nav.timer);
@@ -1307,31 +1308,22 @@
   // page it serves everybody: for washingtonpost.com, the free beginning of
   // the article. Safari keeps X-Forwarded-For out of a navigation, but not out
   // of a request a script makes: fetch() may set both that header and the
-  // User-Agent. So once such a page has loaded, the same address is fetched
-  // from inside the page with the crawler's two headers, which is the request
+  // User-Agent. So while such a page loads, the same address is fetched from
+  // inside the page with the crawler's two headers, which is the request
   // Chrome makes for the navigation itself. When that copy has more running
   // text, its article element takes the place of the page's. Nothing of the
   // copy is executed, and when anything is unclear the page is left as it is.
 
   // Runs in the page (in the extension's own world) and must not use anything
-  // from this file. Reports what it did to onCrawlerUpgrade below.
+  // from this file. It is started when the page's answer arrives, so that the
+  // copy is on its way while the page loads; the article is exchanged once the
+  // page has been parsed, and looked at again when it has loaded. Reports what
+  // it did to onCrawlerUpgrade below, and returns a promise of that report.
   function crawlerUpgrade(config) {
+    if (window.top !== window || window.__bpcSafariCrawler) return null;
+    window.__bpcSafariCrawler = true;
     var api = (typeof browser === 'object' && browser) || (typeof chrome === 'object' && chrome) || null;
-    var root = document.documentElement;
-    var note = { url: location.href };
-    function finish(outcome) {
-      note.outcome = outcome;
-      root.setAttribute('data-bpc-safari-crawler', outcome === 'article replaced' ? 'replaced' : 'unchanged');
-      try {
-        var sent = api && api.runtime && api.runtime.sendMessage({ request: 'bpcSafariCrawlerUpgrade', data: note });
-        if (sent && typeof sent.catch === 'function') sent.catch(function () {});
-      } catch (e) {
-        // nobody to tell
-      }
-      return note;
-    }
-    if (window.top !== window || !root || root.hasAttribute('data-bpc-safari-crawler')) return null;
-    root.setAttribute('data-bpc-safari-crawler', 'fetching');
+    var placed = null; // the exchange in place: {el, fresh, selector, keeper}
 
     function textOf(el) {
       return (el.textContent || '').replace(/\s+/g, ' ').trim();
@@ -1381,14 +1373,26 @@
       });
       return best;
     }
+    // A selector for an element by its tag, id and class names; the tag alone
+    // for the two elements a page has once.
     function selectorOf(el) {
-      if (!el.id && !el.classList.length) return '';
-      return el.tagName.toLowerCase() + (el.id ? '#' + CSS.escape(el.id) : '') +
+      var tag = el.tagName.toLowerCase();
+      if (!el.id && !el.classList.length) return tag === 'article' || tag === 'main' ? tag : '';
+      return tag + (el.id ? '#' + CSS.escape(el.id) : '') +
         Array.prototype.map.call(el.classList, function (name) { return '.' + CSS.escape(name); }).join('');
     }
-    // The same element in the page: found through a paragraph both have, the
-    // same number of steps up; or else by its tag, id and class names.
+    function onlyMatch(selector, there) {
+      if (!selector) return null;
+      var here = document.querySelectorAll(selector + ':not([data-bpc-safari-crawler="article"])');
+      return here.length === 1 && there.querySelectorAll(selector).length === 1 && here[0] !== document.body && here[0] !== document.documentElement ? here[0] : null;
+    }
+    // The same element in the page, and the element of the copy to put there:
+    //  - through a paragraph both have, the same number of steps up;
+    //  - or by the article element's tag, id and class names;
+    //  - or, failing both, the nearest element around the article that can be
+    //    found by name in both: more of the page is exchanged then.
     function counterpartOf(article, list) {
+      var copy = article.ownerDocument;
       var shown = paragraphsIn(document);
       for (var i = 0, tried = 0; i < list.length && tried < 12; i++) {
         if (!article.contains(list[i].el)) continue;
@@ -1401,13 +1405,12 @@
             theirs = theirs.parentElement;
             ours = ours.parentElement;
           }
-          if (ours && ours !== document.body && ours !== root && ours.tagName === article.tagName && ours.className === article.className) return { el: ours, by: 'text' };
+          if (ours && ours !== document.body && ours !== document.documentElement && ours.tagName === article.tagName && ours.className === article.className) return { el: ours, from: article, by: 'text' };
         }
       }
-      var selector = selectorOf(article);
-      if (selector) {
-        var here = document.querySelectorAll(selector);
-        if (here.length === 1 && article.ownerDocument.querySelectorAll(selector).length === 1 && here[0] !== document.body) return { el: here[0], by: 'name' };
+      for (var el = article, by = 'name'; el && el !== copy.body && el !== copy.documentElement; el = el.parentElement, by = 'surroundings') {
+        var match = onlyMatch(selectorOf(el), copy);
+        if (match) return { el: match, from: el, by: by };
       }
       return null;
     }
@@ -1432,64 +1435,128 @@
       return fresh;
     }
 
-    var before = paragraphsIn(document);
-    note.before = { paragraphs: before.length, characters: lengthOf(before) };
-    var controller = typeof AbortController === 'function' ? new AbortController() : null;
-    var timer = setTimeout(function () { if (controller) controller.abort(); }, config.timeout || 15000);
-    return fetch(location.href, {
-      headers: { 'User-Agent': config.userAgent, 'X-Forwarded-For': config.forwardedFor, Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
-      cache: 'no-store',
-      credentials: 'include',
-      signal: controller ? controller.signal : undefined,
-    }).then(function (response) {
-      note.status = response.status;
-      if (!response.ok) throw new Error('status ' + response.status);
-      var charset = /charset=["']?([\w-]+)/i.exec(response.headers.get('content-type') || '');
-      return response.arrayBuffer().then(function (buffer) {
-        try {
-          return new TextDecoder(charset ? charset[1] : 'utf-8').decode(buffer);
-        } catch (e) {
-          return new TextDecoder('utf-8').decode(buffer);
-        }
-      });
-    }).then(function (html) {
-      clearTimeout(timer);
-      note.bytes = html.length;
+    function mark(value) {
+      if (document.documentElement) document.documentElement.setAttribute('data-bpc-safari-crawler', value);
+    }
+    function report(note, outcome) {
+      note.outcome = outcome;
+      mark(outcome === 'article replaced' ? 'replaced' : 'unchanged');
+      try {
+        var sent = api && api.runtime && api.runtime.sendMessage({ request: 'bpcSafariCrawlerUpgrade', data: note });
+        if (sent && typeof sent.catch === 'function') sent.catch(function () {});
+      } catch (e) {
+        // nobody to tell
+      }
+      return note;
+    }
+
+    // The page's own element is hidden, not removed: its scripts may still hold
+    // on to it. For half a minute, see that they do not undo the exchange.
+    function keep() {
+      if (!placed) return;
+      var el = placed.el;
+      if (!el.isConnected && placed.selector) {
+        var again = document.querySelectorAll(placed.selector + ':not([data-bpc-safari-crawler="article"])');
+        if (again.length === 1) el = placed.el = again[0];
+      }
+      if (!el.isConnected) return;
+      if (el.style.display !== 'none') el.style.setProperty('display', 'none', 'important');
+      if (placed.fresh.previousElementSibling !== el) el.parentNode.insertBefore(placed.fresh, el.nextSibling);
+    }
+    function undo() {
+      if (!placed) return;
+      clearInterval(placed.keeper);
+      placed.fresh.remove();
+      if (placed.el.isConnected) placed.el.style.removeProperty('display');
+      placed = null;
+    }
+
+    // Puts the article of the copy into the page. Returns what came of it.
+    function exchange(html, note) {
       var copy = new DOMParser().parseFromString(html, 'text/html');
+      var before = paragraphsIn(document);
       var after = paragraphsIn(copy);
+      note.before = { paragraphs: before.length, characters: lengthOf(before) };
       note.after = { paragraphs: after.length, characters: lengthOf(after) };
-      if (note.after.characters < note.before.characters + 500 || note.after.characters < 1.3 * note.before.characters) return finish('no more text in the copy');
+      if (note.after.characters < note.before.characters + 500 || note.after.characters < 1.3 * note.before.characters) return 'no more text in the copy';
       var article = articleOf(after);
-      if (!article || article === copy.body || article === copy.documentElement) return finish('no article element in the copy');
+      if (!article || article === copy.body || article === copy.documentElement) return 'no article element in the copy';
       note.article = describe(article);
       var target = counterpartOf(article, after);
-      if (!target) return finish('article element not found in the page');
+      if (!target) return 'article element not found in the page';
       note.by = target.by;
-      var fresh = harmlessCopy(article);
-      // The page's own element is hidden, not removed: its scripts may still
-      // hold on to it. For a while, see that they do not undo the change.
-      var selector = selectorOf(target.el);
+      if (target.from !== article) note.exchanged = describe(target.from);
       var checks = 0;
-      function place() {
-        var el = target.el;
-        if (!el.isConnected && selector) {
-          var again = document.querySelectorAll(selector + ':not([data-bpc-safari-crawler="article"])');
-          if (again.length === 1) el = target.el = again[0];
-        }
-        if (!el.isConnected) return;
-        if (el.style.display !== 'none') el.style.setProperty('display', 'none', 'important');
-        if (fresh.previousElementSibling !== el) el.parentNode.insertBefore(fresh, el.nextSibling);
-      }
-      place();
-      var keeper = setInterval(function () {
-        place();
-        if (++checks >= 20) clearInterval(keeper);
+      placed = { el: target.el, fresh: harmlessCopy(target.from), selector: selectorOf(target.el) };
+      keep();
+      placed.keeper = setInterval(function () {
+        keep();
+        if (++checks >= 60 && placed) clearInterval(placed.keeper);
       }, 500);
-      return finish('article replaced');
-    }).catch(function (e) {
-      clearTimeout(timer);
-      return finish('request failed: ' + (e && e.message || e));
-    });
+      return 'article replaced';
+    }
+
+    function copyOf(url) {
+      var controller = typeof AbortController === 'function' ? new AbortController() : null;
+      var timer = setTimeout(function () { if (controller) controller.abort(); }, config.timeout || 15000);
+      return fetch(url, {
+        headers: { 'User-Agent': config.userAgent, 'X-Forwarded-For': config.forwardedFor, Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+        cache: 'no-store',
+        credentials: 'include',
+        signal: controller ? controller.signal : undefined,
+      }).then(function (response) {
+        if (!response.ok) throw new Error('status ' + response.status);
+        var charset = /charset=["']?([\w-]+)/i.exec(response.headers.get('content-type') || '');
+        return response.arrayBuffer().then(function (buffer) {
+          clearTimeout(timer);
+          try {
+            return new TextDecoder(charset ? charset[1] : 'utf-8').decode(buffer);
+          } catch (e) {
+            return new TextDecoder('utf-8').decode(buffer);
+          }
+        });
+      }).catch(function (e) {
+        clearTimeout(timer);
+        throw e;
+      });
+    }
+
+    // One article: fetch the copy, exchange when the page is parsed, and look
+    // once more when it has loaded if that did not work.
+    function run() {
+      var url = location.href;
+      var note = { url: url };
+      mark('fetching');
+      return copyOf(url).then(function (html) {
+        note.bytes = html.length;
+        return new Promise(function (resolve) {
+          function settle(last) {
+            if (location.href !== url) return resolve(null); // the page moved on
+            var outcome = exchange(html, note);
+            if (outcome === 'article replaced' || last || document.readyState === 'complete') return resolve(report(note, outcome));
+            window.addEventListener('load', function () { setTimeout(function () { settle(true); }, 300); }, { once: true });
+            return undefined;
+          }
+          if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { settle(false); }, { once: true });
+          else settle(false);
+        });
+      }, function (e) {
+        return report(note, 'request failed: ' + (e && e.message || e));
+      });
+    }
+
+    // A page may show another article without loading a new document: take
+    // the exchange back and start over for the new address.
+    var address = location.pathname + location.search;
+    setInterval(function () {
+      var now = location.pathname + location.search;
+      if (now === address) return;
+      address = now;
+      undo();
+      setTimeout(run, 1200);
+    }, 1000);
+
+    return run();
   }
 
   // Where the copy did not help twice in a row, it is not asked for again

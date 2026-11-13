@@ -501,14 +501,18 @@ const fullCrawlerRule = (id, domain, userAgent = GOOGLEBOT, address = '66.249.66
 };
 const WAPO = 'https://www.washingtonpost.com/opinions/2026/11/13/some-article/';
 
-test('crawler copy: asked for on a loaded page of a site without crawler user agent', async () => {
+test('crawler copy: asked for when the answer of a site without crawler user agent arrives', async () => {
   const world = crawlerWorld({ rules: [] });
-  await world.load(4, WAPO);
+  await world.fire('onBeforeNavigate', { tabId: 4, frameId: 0, url: WAPO });
+  assert.deepEqual(world.upgrades, [], 'not before there is a page');
+  await world.fire('onCommitted', { tabId: 4, frameId: 0, url: WAPO });
   assert.deepEqual(world.upgrades, [{ tabId: 4, userAgent: GOOGLEBOT, forwardedFor: '66.249.66.1' }]);
+  await world.fire('onCompleted', { tabId: 4, frameId: 0, url: WAPO });
+  assert.equal(world.upgrades.length, 1, 'once per page');
 
   // Not on other sites, not in frames, and not when Safari can send X-Forwarded-For itself.
   await world.load(4, NEWS);
-  await world.fire('onCompleted', { tabId: 4, frameId: 2, url: WAPO });
+  await world.fire('onCommitted', { tabId: 4, frameId: 2, url: WAPO });
   await world.load(4, 'https://washingtonpost.com.example.org/');
   assert.equal(world.upgrades.length, 1);
   const capable = crawlerWorld({ stored: {}, rules: [] });
