@@ -1,0 +1,47 @@
+name: Safari app test
+
+# Runs the Safari build of the extension in the real Safari app on a macOS
+# runner, driven by safaridriver (see safari/engine/safari-app.sh).
+
+on:
+  push:
+    branches: [safari-app-test]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: safari-app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    name: Safari app (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15]
+    steps:
+      - uses: actions/checkout@v4
+      - name: System
+        run: |
+          sw_vers
+          defaults read /Applications/Safari.app/Contents/Info CFBundleShortVersionString || true
+          safaridriver --version || true
+          node --version
+          networksetup -listallnetworkservices || true
+      - name: Run the extension in Safari
+        run: safari/engine/safari-app.sh build/safari/app-test
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: safari-app-${{ matrix.os }}
+          path: |
+            build/safari/app-test/*.json
+            build/safari/app-test/*.jsonl
+            build/safari/app-test/*.log
+          if-no-files-found: warn

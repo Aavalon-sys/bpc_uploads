@@ -8,7 +8,9 @@
 // The proxy port is an HTTP proxy that the test's web views are configured to
 // use: it answers every request itself and tunnels every CONNECT to the local
 // HTTPS server, whatever the host name. The real sites are never contacted
-// and no DNS or /etc/hosts change is needed.
+// and no DNS or /etc/hosts change is needed. For the Safari app test, which
+// cannot give Safari a proxy of its own, http://127.0.0.1:<proxy-port>/proxy.pac
+// is a proxy auto-configuration that sends only the stand-in sites here.
 //
 // Every request is appended to the log as one JSON line, which is how the
 // test sees the headers WebKit really sent and which scripts were fetched.
@@ -80,10 +82,25 @@ ${site.body || ''}
 `;
 }
 
-function handler(scheme, logFile) {
+// Proxy auto-configuration for the Safari app test: only the stand-in sites go
+// through the local proxy, everything else on the machine stays direct.
+function pac(proxyPort) {
+  return `function FindProxyForURL(url, host) {
+  var hosts = ${JSON.stringify(Object.keys(SITES))};
+  return hosts.indexOf(host) >= 0 ? "PROXY 127.0.0.1:${proxyPort}" : "DIRECT";
+}
+`;
+}
+
+function handler(scheme, logFile, proxyPort) {
   return (req, res) => {
     const host = String(req.headers.host || '').replace(/:\d+$/, '');
     const url = new URL(req.url, `${scheme}://${host}`);
+    if (scheme === 'http' && url.pathname === '/proxy.pac' && host === '127.0.0.1') {
+      res.writeHead(200, { 'content-type': 'application/x-ns-proxy-autoconfig', 'cache-control': 'no-store' });
+      res.end(pac(proxyPort));
+      return;
+    }
     fs.appendFileSync(logFile, JSON.stringify({
       t: new Date().toISOString(),
       scheme,
@@ -131,7 +148,7 @@ function main() {
 
   // Plain requests sent to the proxy are answered directly; CONNECT is
   // tunnelled to the HTTPS server above regardless of the requested host.
-  const proxy = http.createServer(handler('http', args.log));
+  const proxy = http.createServer(handler('http', args.log, Number(args['proxy-port'])));
   proxy.on('connect', (req, client, head) => {
     const upstream = net.connect(httpsPort, '127.0.0.1', () => {
       client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
