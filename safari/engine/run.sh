@@ -153,6 +153,8 @@ run_scenario enabled --safari-version "$SAFARI_VERSION" --load-delay 6 --grant a
 run_scenario legacy --safari-version 17.6 --load-delay 6 --grant all "${FEW[@]}"
 # The extension is loaded while the browser starts (WebKit sends no install event then).
 run_scenario launch --safari-version "$SAFARI_VERSION" --load-delay 0 --grant all "${FEW[@]}"
+# The background page was unloaded for lack of events and a page load wakes it up.
+run_scenario idle --safari-version "$SAFARI_VERSION" --load-delay 6 --grant all --idle 40 "${FEW[@]}"
 # No website access was granted.
 run_scenario noaccess --safari-version "$SAFARI_VERSION" --load-delay 6 --grant none "${FEW[@]}"
 # A Private Browsing window (extensions are off there unless the user allows it).

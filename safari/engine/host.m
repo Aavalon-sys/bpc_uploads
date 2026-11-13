@@ -495,6 +495,7 @@ int main(int argc, const char *argv[])
         NSString *grant = @"all";
         NSTimeInterval loadDelay = 6;
         NSTimeInterval settle = 5;
+        NSTimeInterval idle = 0;
         NSString *proxy = nil;
         NSString *safariVersion = nil;
         BOOL privateBrowsing = NO;
@@ -507,6 +508,7 @@ int main(int argc, const char *argv[])
             else if ([arg isEqualToString:@"--grant"]) { grant = value; i++; }
             else if ([arg isEqualToString:@"--load-delay"]) { loadDelay = value.doubleValue; i++; }
             else if ([arg isEqualToString:@"--settle"]) { settle = value.doubleValue; i++; }
+            else if ([arg isEqualToString:@"--idle"]) { idle = value.doubleValue; i++; }
             else if ([arg isEqualToString:@"--proxy"]) { proxy = value; i++; }
             else if ([arg isEqualToString:@"--safari-version"]) { safariVersion = value; i++; }
             else if ([arg isEqualToString:@"--private"]) { privateBrowsing = YES; }
@@ -514,7 +516,7 @@ int main(int argc, const char *argv[])
             else { fprintf(stderr, "unknown argument %s\n", argv[i]); return 2; }
         }
         if (!extensionPath || !outPath) {
-            fprintf(stderr, "usage: bpc-webkit-host --extension <dir> --out <file> [--load-delay s] [--grant all|none] [--settle s] [--proxy host:port] [--safari-version x.y] [--private] [--url u]...\n");
+            fprintf(stderr, "usage: bpc-webkit-host --extension <dir> --out <file> [--load-delay s] [--grant all|none] [--settle s] [--idle s] [--proxy host:port] [--safari-version x.y] [--private] [--url u]...\n");
             return 2;
         }
 
@@ -522,7 +524,7 @@ int main(int argc, const char *argv[])
         NSOperatingSystemVersion os = NSProcessInfo.processInfo.operatingSystemVersion;
         result[@"os"] = [NSString stringWithFormat:@"macOS %ld.%ld.%ld", (long)os.majorVersion, (long)os.minorVersion, (long)os.patchVersion];
         result[@"webkit"] = [NSBundle bundleForClass:WKWebView.class].infoDictionary[@"CFBundleVersion"] ?: @"?";
-        result[@"options"] = @{ @"grant": grant, @"loadDelay": @(loadDelay), @"settle": @(settle), @"proxy": proxy ?: @"", @"safariVersion": safariVersion ?: @"", @"private": @(privateBrowsing) };
+        result[@"options"] = @{ @"grant": grant, @"loadDelay": @(loadDelay), @"settle": @(settle), @"idle": @(idle), @"proxy": proxy ?: @"", @"safariVersion": safariVersion ?: @"", @"private": @(privateBrowsing) };
 
         void (^finish)(void) = ^{
             NSData *data = [NSJSONSerialization dataWithJSONObject:jsonSafe(result) options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
@@ -642,6 +644,18 @@ int main(int argc, const char *argv[])
         result[@"backgroundProbeAvailable"] = @([host.context respondsToSelector:@selector(_backgroundWebView)]);
         result[@"backgroundAfterStart"] = callJSON(backgroundView(), kBackgroundProbe, WKContentWorld.pageWorld, 30);
         logLine(@"background after start: %@", compact(result[@"backgroundAfterStart"]));
+
+        // 4b. Leave the extension alone for a while. WebKit unloads a
+        // non-persistent background page after 30 seconds without events; the
+        // next page load then has to wake it up, which is what happens all day
+        // in normal use.
+        if (idle > 0) {
+            [host note:@"idle" detail:[NSString stringWithFormat:@"%.0f s", idle]];
+            spin(idle);
+            BOOL unloaded = [host.context respondsToSelector:@selector(_backgroundWebView)] && host.context._backgroundWebView == nil;
+            result[@"backgroundUnloadedWhileIdle"] = @(unloaded);
+            logLine(@"background page unloaded while idle: %d", unloaded);
+        }
 
         // 5. Visit the test pages.
         WKContentWorld *contentWorld = [WKContentWorld worldWithName:[@"WebExtension-" stringByAppendingString:host.context.uniqueIdentifier]];

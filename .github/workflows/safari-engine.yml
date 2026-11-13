@@ -1,8 +1,10 @@
 name: Safari engine test
 
-# Runs the Safari build of the extension in WebKit's real web-extension engine
-# (the WKWebExtension API that Safari is built on) on a macOS runner and checks
-# what it actually does: request headers, blocked scripts, content scripts.
+# Runs the Safari build of the extension on a macOS runner and checks what it
+# actually does (request headers, blocked scripts, content scripts):
+#  - in WebKit's real web-extension engine, the WKWebExtension API that Safari
+#    is built on, where the test can also look inside the extension;
+#  - in the Safari app itself, driven by safaridriver.
 
 on:
   push:
@@ -29,9 +31,9 @@ concurrency:
 
 jobs:
   engine:
-    name: WebKit engine (${{ matrix.os }})
+    name: WebKit engine and Safari (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -44,6 +46,7 @@ jobs:
           xcodebuild -version
           defaults read /Applications/Safari.app/Contents/Info CFBundleShortVersionString || true
           node --version
+          safaridriver --version || true
           for dir in /System/Cryptexes/App/System/Library/StagedFrameworks/Safari /System/Volumes/Preboot/Cryptexes/App/System/Library/StagedFrameworks/Safari /Library/Apple/System/Library/StagedFrameworks/Safari; do
             echo "staged frameworks in $dir:"
             ls "$dir" 2>/dev/null | head -20 || true
@@ -61,6 +64,9 @@ jobs:
             echo "=== $f"
             tail -n 60 "$f" || true
           done
+      - name: Run the extension in the Safari app
+        if: always()
+        run: safari/engine/safari-app.sh build/safari/app-test
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
@@ -70,4 +76,8 @@ jobs:
             build/safari/engine/*.json
             build/safari/engine/*.jsonl
             build/safari/engine/*.log
+            build/safari/app-test/*.json
+            build/safari/app-test/*.jsonl
+            build/safari/app-test/*.log
+            build/safari/app-test/*.png
           if-no-files-found: warn
