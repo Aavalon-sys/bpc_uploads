@@ -27,17 +27,27 @@ concurrency:
   group: safari-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Shown on the extension's diagnostics page, so that an installed copy can be
+  # traced back to the commit it was built from.
+  BPC_BUILD_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+
 jobs:
   test:
     name: Build and test the extension folder
     runs-on: ubuntu-latest
+    outputs:
+      build-number: ${{ steps.build.outputs.number }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Build Safari extension folder
-        run: node safari/build.mjs --zip
+        id: build
+        run: |
+          node safari/build.mjs --zip
+          echo "number=$(node -p 'require("./build/safari/extension/safari-build.json").build.number')" >> "$GITHUB_OUTPUT"
       - name: Run tests
         run: node --test --test-concurrency=1 safari/test/*.test.mjs
       - name: Upload extension folder
@@ -55,6 +65,8 @@ jobs:
     env:
       APP_NAME: Bypass Paywalls Clean
       BUNDLE_ID: io.github.aavalon-sys.bypass-paywalls-clean
+      # The same build number as the extension folder built above.
+      BPC_BUILD_NUMBER: ${{ needs.test.outputs.build-number }}
     steps:
       - uses: actions/checkout@v4
       - name: Build Safari extension folder
@@ -84,6 +96,14 @@ jobs:
           plutil -extract NSExtension.NSExtensionPointIdentifier raw "$APPEX/Contents/Info.plist"
           test -f "$APPEX/Contents/Resources/manifest.json"
           test -f "$APPEX/Contents/Resources/safari-compat.js"
+          # The app and its extension carry this build's number, so that a newer copy counts as newer.
+          BUILD=$(node -p 'require("./build/safari/extension/safari-build.json").build.number')
+          echo "Build number: $BUILD, commit $BPC_BUILD_COMMIT"
+          test "$BUILD" = "$BPC_BUILD_NUMBER"
+          test "$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist")" = "$BUILD"
+          test "$(plutil -extract CFBundleVersion raw "$APPEX/Contents/Info.plist")" = "$BUILD"
+          plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist"
+          grep -q "\"$BPC_BUILD_COMMIT\"" "$APPEX/Contents/Resources/safari-build.json"
           codesign --verify --deep --strict --verbose=2 "$APP"
           ditto -c -k --keepParent "$APP" "dist/Bypass-Paywalls-Clean-macOS.zip"
           (cd build/safari && zip -qr ../../dist/Bypass-Paywalls-Clean-Xcode-project.zip xcode)

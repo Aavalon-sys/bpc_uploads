@@ -56,7 +56,7 @@
     return Promise.all([
       safe(function () { return api.permissions.getAll(); }),
       siteHost ? safe(function () { return api.permissions.contains({ origins: [new URL(siteUrl).origin + '/*'] }); }) : Promise.resolve(null),
-      safe(function () { return api.storage.local.get(['sites', 'optIn', 'optInFetch', 'optInUpdate', 'bpc_safari_report']); }),
+      safe(function () { return api.storage.local.get(['sites', 'optIn', 'optInFetch', 'optInUpdate', 'bpc_safari_report', 'bpc_safari_first_run', 'bpc_safari_site_names']); }),
       safe(function () { return api.runtime.sendMessage({ request: 'bpcSafariDiag', url: siteUrl }); }),
       safe(function () { return api.declarativeNetRequest.getSessionRules(); }),
       tabId !== null ? safe(function () { return api.declarativeNetRequest.getMatchedRules({ tabId: tabId }); }) : Promise.resolve(null),
@@ -69,8 +69,13 @@
           },
         });
       }) : Promise.resolve(null),
+      // Which build Safari really loaded (an older copy of the app may still be in use).
+      safe(function () {
+        return fetch(api.runtime.getURL('safari-build.json')).then(function (response) { return response.json(); });
+      }),
     ]).then(function (r) {
-      var perms = r[0], siteAccess = r[1], store = r[2], bg = r[3], rules = r[4], matched = r[5], probe = r[6];
+      var perms = r[0], siteAccess = r[1], store = r[2], bg = r[3], rules = r[4], matched = r[5], probe = r[6], build = r[7];
+      add('safari build', build && build.build ? build.build : build);
 
       // Permissions
       var origins = perms && perms.origins;
@@ -85,6 +90,7 @@
       var siteCount = store && store.sites ? Object.keys(store.sites).length : 0;
       add('enabled sites in options', isError(store) ? store : siteCount);
       add('opt-in', isError(store) ? store : { optIn: store.optIn, optInFetch: store.optInFetch, optInUpdate: store.optInUpdate });
+      if (!isError(store)) add('first run / stored site list check', [store.bpc_safari_first_run || null, store.bpc_safari_site_names || null]);
       if (!isError(store) && !siteCount) say('bad', '选项里一个站点都没有启用：打开扩展的 Options，勾选要用的站点后保存。');
 
       // Background page
@@ -96,7 +102,11 @@
         if (bg.backgroundLoaded === false) say('bad', '后台脚本没有完整加载（background.js 未运行）。');
         if (bg.errors && bg.errors.length) say('warn', '后台页有 ' + bg.errors.length + ' 个报错，见下方 background.errors。');
         if (siteHost && bg.siteEnabled === false) say('warn', '当前网站不在已启用的站点里（不受支持，或在 Options 里没有勾选）。');
-        if (bg.lastAddCall && bg.lastAddCall.batchRejected) say('warn', 'Safari 拒绝了部分规则：' + JSON.stringify(bg.lastAddCall.dropped));
+        // Rules Safari cannot express are left out on purpose (see README); anything else is unexpected.
+        var expected = ['responseHeaders not supported by Safari', 'only modifies request headers Safari refuses'];
+        var dropped = (bg.lastAddCall && bg.lastAddCall.dropped) || {};
+        var unexpected = Object.keys(dropped).filter(function (reason) { return expected.indexOf(reason) < 0; });
+        if (unexpected.length) say('warn', 'Safari 拒绝了部分规则：' + JSON.stringify(dropped));
       }
 
       // Rules

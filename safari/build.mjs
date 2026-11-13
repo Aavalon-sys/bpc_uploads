@@ -45,6 +45,28 @@ function parseArgs(argv) {
 
 const sha256 = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
+// What identifies this build: the commit it was built from (BPC_BUILD_COMMIT,
+// or the checked out commit) and a number that grows with every build
+// (BPC_BUILD_NUMBER, or the UTC time as YYYYMMDD.H.M, three integers as Apple
+// requires of a build number). The Safari diagnostics page shows both, and
+// the Xcode project uses the number as the app's build number, so that a
+// newer copy of the app always counts as newer (safari/xcode/set-version.mjs).
+function buildIdentity(now = new Date()) {
+  let commit = process.env.BPC_BUILD_COMMIT || null;
+  if (!commit) {
+    try {
+      const git = (...args) => execFileSync('git', ['-C', repo, ...args], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+      commit = git('rev-parse', 'HEAD') + (git('status', '--porcelain', '--', 'safari', '*.zip') ? '+changes' : '');
+    } catch (e) {
+      commit = null; // not a git checkout
+    }
+  }
+  const stamp = now.toISOString().replace(/\D/g, ''); // YYYYMMDDHHMMSSmmm
+  const number = /^\d+(\.\d+){0,2}$/.test(process.env.BPC_BUILD_NUMBER || '') ? process.env.BPC_BUILD_NUMBER
+    : `${stamp.slice(0, 8)}.${Number(stamp.slice(8, 10))}.${Number(stamp.slice(10, 12))}`;
+  return { commit, number, builtAt: now.toISOString() };
+}
+
 function unzipTo(zip, dir) {
   execFileSync('unzip', ['-q', '-o', zip, '-d', dir], { stdio: ['ignore', 'ignore', 'inherit'] });
 }
@@ -333,6 +355,7 @@ export function build(options = {}) {
     const info = {
       name: manifest.name,
       version: manifest.version,
+      build: buildIdentity(),
       source: path.basename(args.src),
       sourceSha256: fs.statSync(args.src).isFile() ? sha256(args.src) : null,
       domPurify: purify,
@@ -363,6 +386,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   try {
     const res = build(parseArgs(process.argv));
     console.log(`Safari extension ${res.info.version} written to ${path.relative(process.cwd(), res.out) || '.'}`);
+    console.log(`  build ${res.info.build.number}, commit ${res.info.build.commit || 'unknown'}`);
     for (const p of res.info.patches) console.log(`  patched (${p.matches}x): ${p.patch}`);
     console.log(`  DOMPurify: ${res.info.domPurify}`);
     console.log(`  rewritten without non-ASCII characters: ${res.info.asciiScripts.join(', ') || 'none'}`);

@@ -527,6 +527,32 @@ test('Safari build: a site list the user cut down keeps its sites', async () => 
   assert.deepEqual(Object.keys(run.store.sites).sort(), Object.keys(chosen).sort());
 });
 
+// --- Build identity --------------------------------------------------------
+
+test('Safari build: the build names its commit and carries a build number for the app', () => {
+  const info = JSON.parse(fs.readFileSync(path.join(safariDir, 'safari-build.json'), 'utf8'));
+  // One to three integers, as Apple requires of an app's build number; by default the UTC date and time.
+  assert.match(info.build.number, process.env.BPC_BUILD_NUMBER ? /^\d+(\.\d+){0,2}$/ : /^20\d{6}\.\d{1,2}\.\d{1,2}$/);
+  assert.ok(info.build.number.length <= 18);
+  if (process.env.BPC_BUILD_COMMIT) assert.equal(info.build.commit, process.env.BPC_BUILD_COMMIT);
+  else assert.ok(info.build.commit === null || /^[0-9a-f]{40}(\+changes)?$/.test(info.build.commit), String(info.build.commit));
+  assert.ok(!Number.isNaN(Date.parse(info.build.builtAt)));
+
+  // set-version.mjs writes the numbers into the Xcode project that wraps the extension.
+  const project = path.join(tmp, 'Test.xcodeproj');
+  fs.mkdirSync(project);
+  const pbxproj = path.join(project, 'project.pbxproj');
+  fs.writeFileSync(pbxproj, '\t\t\t\tCURRENT_PROJECT_VERSION = 1;\n\t\t\t\tMARKETING_VERSION = 1.0;\n\t\t\t\tOTHER = 1;\n\t\t\t\tCURRENT_PROJECT_VERSION = 1;\n\t\t\t\tMARKETING_VERSION = 1.0;\n');
+  const script = path.join(repo, 'safari', 'xcode', 'set-version.mjs');
+  const out = execFileSync(process.execPath, [script, safariDir, project]).toString();
+  const version = info.version.split('.').slice(0, 3).join('.');
+  assert.match(out, new RegExp(`App version ${version.replace(/\./g, '\\.')}, build ${info.build.number.replace(/\./g, '\\.')} \\(4 settings`));
+  assert.equal(fs.readFileSync(pbxproj, 'utf8'), `\t\t\t\tCURRENT_PROJECT_VERSION = ${info.build.number};\n\t\t\t\tMARKETING_VERSION = ${version};\n\t\t\t\tOTHER = 1;\n\t\t\t\tCURRENT_PROJECT_VERSION = ${info.build.number};\n\t\t\t\tMARKETING_VERSION = ${version};\n`);
+  // A project without version settings is an error, not a silent no-op.
+  fs.writeFileSync(pbxproj, 'OTHER = 1;\n');
+  assert.throws(() => execFileSync(process.execPath, [script, safariDir, project], { stdio: 'pipe' }));
+});
+
 // --- Scripts injected into the page's own JavaScript world -----------------
 // For some sites the background injects the content scripts with
 // world: "MAIN". A page in Safari has no `chrome` and no `browser` object.

@@ -45,7 +45,7 @@ rm -f "$OUT_ABS"
 (cd "$STAGE" && zip -qry "$OUT_ABS" Payload)
 
 echo "IPA: $OUT"
-echo "  app:       $(basename "$APP") $(plutil -extract CFBundleShortVersionString raw "$APP/Info.plist") ($(plutil -extract CFBundleIdentifier raw "$APP/Info.plist"))"
+echo "  app:       $(basename "$APP") $(plutil -extract CFBundleShortVersionString raw "$APP/Info.plist") build $(plutil -extract CFBundleVersion raw "$APP/Info.plist") ($(plutil -extract CFBundleIdentifier raw "$APP/Info.plist"))"
 echo "  extension: $(basename "$APPEX") ($(plutil -extract CFBundleIdentifier raw "$APPEX/Info.plist"))"
 echo "  minimum iOS: $(plutil -extract MinimumOSVersion raw "$APP/Info.plist")"
 echo "  size: $(du -h "$OUT_ABS" | cut -f1)"
