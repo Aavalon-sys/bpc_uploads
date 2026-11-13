@@ -21,7 +21,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:-$ROOT/build/safari/app-test}"
 EXT="$ROOT/build/safari/extension"
-HOSTS=(www.washingtonpost.com www.nbcnews.com www.nytimes.com www.ft.com www.wsj.com hbr.org www.dallasnews.com www.ajc.com www.hola.com www.bpc-control.test)
+HOSTS=(www.washingtonpost.com www.nbcnews.com www.nytimes.com www.ft.com www.wsj.com www.la-croix.com www.dallasnews.com www.ajc.com www.hola.com www.bpc-control.test)
 CERT_NAME=bpc-safari-app-test
 HTTPS_PORT=18443
 PROXY_PORT=18080

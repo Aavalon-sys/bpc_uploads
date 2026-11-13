@@ -72,16 +72,17 @@ export const SITES = {
     // `general` matches a rule that applies to every site ("/paywall/evercookie_get.js").
     scripts: { ok: '/ok.js?n=ok', evolok: '/evolok/ev-em.min.js?n=evolok', general: '/paywall/evercookie_get.js?n=general' },
     blocked: ['evolok', 'general'],
+    hidden: ['ad'],
     body: '<div data-ad-title="test" data-probe="ad">ADVERT (the content script hides this)</div>',
   },
-  'hbr.org': {
-    rule: 'content scripts injected into the page\'s own world (world: "MAIN") remove the paywall',
+  'www.la-croix.com': {
+    rule: 'content scripts injected into the page\'s own world (world: "MAIN") hide the advert',
     scripts: { ok: '/ok.js?n=ok' },
     blocked: [],
     // The site code runs in the page world; the extension's content world stays empty.
     world: 'MAIN',
-    removed: ['banner', 'paywall'],
-    body: '<div class="persistent-banner" data-probe="banner">BANNER (the content script removes this)</div>\n<div id="paywall-engine" data-probe="paywall">PAYWALL (the content script removes this)</div>',
+    hidden: ['ad'],
+    body: '<div data-gam="banner" data-probe="ad">ADVERT (the content script hides this)</div>',
   },
   // Not a supported site: the extension must leave it alone.
   'www.bpc-control.test': {

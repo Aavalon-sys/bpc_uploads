@@ -178,10 +178,8 @@ function scenario(name, expect, { optional = false } = {}) {
         check(name, world.contentScript === true && world.csLocal === true, `${label}: content scripts injected into the page world`);
         check(name, world.extChromium === true, `${label}: the page-world scripts take the Chromium code path`);
       } else check(name, injected, `${label}: content script injected`);
-      for (const probe of site.removed || [])
-        check(name, !!p.probes && !(probe in p.probes), `${label}: content script removed the "${probe}" element`);
-      if (url.hostname === 'www.hola.com')
-        check(name, p.probes && p.probes.ad && p.probes.ad.display === 'none', `${label}: content script hid the advert (display=${p.probes && p.probes.ad && p.probes.ad.display})`);
+      for (const probe of site.hidden || [])
+        check(name, !!p.probes && !!p.probes[probe] && p.probes[probe].display === 'none', `${label}: content script hid the "${probe}" element (display=${p.probes && p.probes[probe] && p.probes[probe].display})`);
     } else {
       // Unsupported site, or the extension has no access: nothing may change.
       check(name, !!doc && !GOOGLEBOT.test(doc.userAgent || '') && !/google|drudge/.test(doc.referer || ''), `${label}: request headers untouched`);
