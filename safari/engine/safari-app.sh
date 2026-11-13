@@ -101,9 +101,58 @@ URLS=()
 for host in "${HOSTS[@]}"; do
   URLS+=(--url "https://$host/test/article.html")
 done
+
+# On its first start the extension opens its options page and an opt-in page.
+# A WebDriver session cannot cope with pages of the safari-web-extension scheme
+# (Safari never reports the end of their load and stops answering), so the copy
+# under test keeps the extension from opening its own pages. Nothing else differs.
+QUIET="$OUT/extension-quiet"
+rm -rf "$QUIET"
+cp -R "$EXT" "$QUIET"
+cat > "$QUIET/safari-test-quiet.js" <<'JS'
+// Test only (safari/engine/safari-app.sh): the extension opens none of its own pages.
+(function () {
+  [typeof browser === 'object' ? browser : null, typeof chrome === 'object' ? chrome : null].forEach(function (api) {
+    if (!api) return;
+    try {
+      api.runtime.openOptionsPage = function (callback) {
+        if (typeof callback === 'function') setTimeout(callback, 0);
+        return Promise.resolve();
+      };
+      var create = api.tabs.create;
+      api.tabs.create = function (properties, callback) {
+        var url = String((properties && properties.url) || '');
+        if (/^https?:/.test(url)) return create.apply(this, arguments);
+        if (typeof callback === 'function') setTimeout(callback, 0, {});
+        return Promise.resolve({});
+      };
+    } catch (e) {
+      console.error('safari-test-quiet: ' + e);
+    }
+  });
+})();
+JS
+node -e '
+const fs = require("fs");
+const file = process.argv[1] + "/manifest.json";
+const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
+manifest.background.scripts.unshift("safari-test-quiet.js");
+fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
+' "$QUIET"
+
 status=0
-node safari/engine/safari-app.mjs --extension "$EXT" --out "$OUT/safari-app.json" "${URLS[@]}" 2>&1 | tee "$OUT/safari-app.host.log" || status=$?
+node safari/engine/safari-app.mjs --extension "$QUIET" --out "$OUT/safari-app.json" "${URLS[@]}" 2>&1 | tee "$OUT/safari-app.host.log" || status=$?
 echo "   exit status: $status"
+
+if [ "${BPC_APP_FIRST_RUN:-}" = "1" ]; then
+  echo "== The unchanged extension (opens its own pages on the first start)"
+  # The server keeps appending to its log: set the first run's requests aside.
+  cp "$OUT/safari-app.requests.jsonl" "$OUT/safari-app.requests.keep"
+  node safari/engine/safari-app.mjs --extension "$EXT" --out "$OUT/safari-app-first-run.json" --diagnostics no \
+    --url "https://www.washingtonpost.com/test/article.html" --url "https://www.hola.com/test/article.html" 2>&1 | tee "$OUT/safari-app-first-run.host.log" || true
+  cp "$OUT/safari-app.requests.jsonl" "$OUT/safari-app-first-run.requests.jsonl"
+  mv "$OUT/safari-app.requests.keep" "$OUT/safari-app.requests.jsonl"
+fi
 
 echo "== Report"
 node safari/engine/report.mjs "$OUT" --app

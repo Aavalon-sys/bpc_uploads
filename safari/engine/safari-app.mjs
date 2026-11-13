@@ -3,7 +3,8 @@
 // extension loaded, and records what happens on the local stand-in sites.
 //
 //   node safari/engine/safari-app.mjs --extension <dir> --out <result.json>
-//        [--driver-port 4477] [--settle 5] --url <url> [--url <url> ...]
+//        [--driver-port 4477] [--wait 10] [--settle 5] [--diagnostics no]
+//        --url <url> [--url <url> ...]
 //
 // Started by safari-app.sh, which also starts the stand-in sites and points
 // the system at them. Safari loads the extension through WebDriver's "Load
@@ -13,10 +14,10 @@
 // windows, permissions and events are Safari's own. A WebDriver session only
 // reaches the page, so the checks are about what a page and the server see.
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 
-const args = { 'driver-port': '4477', settle: '5', url: [] };
+const args = { 'driver-port': '4477', settle: '5', wait: '10', url: [] };
 for (let i = 2; i < process.argv.length; i += 2) {
   const key = process.argv[i].replace(/^--/, '');
   if (key === 'url') args.url.push(process.argv[i + 1]);
@@ -36,6 +37,14 @@ const event = (type, detail) => {
 };
 const sleep = (seconds) => new Promise((r) => setTimeout(r, seconds * 1000));
 const save = () => fs.writeFileSync(args.out, JSON.stringify(result, null, 2) + '\n');
+// A picture of the screen next to the result file, to see what Safari shows.
+const screenshot = (name) => {
+  try {
+    execFileSync('screencapture', ['-x', args.out.replace(/\.json$/, '') + `.${name}.png`], { timeout: 15000, stdio: 'ignore' });
+  } catch (e) {
+    event('no screenshot', String(e && e.message || e).slice(0, 200));
+  }
+};
 
 const base = `http://127.0.0.1:${args['driver-port']}`;
 async function wd(method, path, body, timeoutSeconds = 60) {
@@ -115,20 +124,22 @@ async function main() {
       result.fatal = 'Safari did not load the extension through WebDriver';
       return;
     }
-    // First start of the extension: default sites, rules, options page.
-    await sleep(10);
-    const handles = await wd('GET', `${s}/window/handles`);
-    event('windows after loading', handles.value);
+    event('windows right after loading', (await wd('GET', `${s}/window/handles`, undefined, 15)).value);
+    // First start of the extension: default sites, rules, its own pages.
+    await sleep(Number(args.wait));
+    screenshot('loaded');
+    event('windows after the first start', (await wd('GET', `${s}/window/handles`, undefined, 15)).value);
 
-    await wd('POST', `${s}/timeouts`, { pageLoad: 30000, script: 20000 });
+    await wd('POST', `${s}/timeouts`, { pageLoad: 20000, script: 15000 }, 15);
+    let failures = 0;
     for (const url of args.url) {
       const page = { requested: url };
-      const nav = await wd('POST', `${s}/url`, { url }, 60);
+      const nav = await wd('POST', `${s}/url`, { url }, 30);
       page.finished = !failed(nav);
       if (!page.finished) page.navigationError = JSON.stringify(nav.value).slice(0, 300);
-      event('navigate', { url, ok: page.finished });
+      event('navigate', { url, ok: page.finished, error: page.navigationError });
       await sleep(Number(args.settle));
-      const probe = await wd('POST', `${s}/execute/sync`, { script: PAGE_PROBE, args: [] }, 30);
+      const probe = await wd('POST', `${s}/execute/sync`, { script: PAGE_PROBE, args: [] }, 20);
       try {
         page.page = JSON.parse(probe.value);
       } catch (e) {
@@ -136,22 +147,29 @@ async function main() {
       }
       result.pages.push(page);
       save();
+      if (result.pages.length === 1 || !page.finished) screenshot(`page${result.pages.length}`);
+      failures = page.finished ? 0 : failures + 1;
+      if (failures >= 2) {
+        result.fatal = 'Safari stopped answering WebDriver commands';
+        return;
+      }
     }
 
     // The extension's own diagnostics page shows what Safari granted and what
     // the background did. Safari may not report the end of this page load.
     const id = typeof loaded === 'string' ? loaded : loaded && (loaded.extensionId || loaded.extension || loaded.identifier || loaded.id);
-    if (id) {
-      await wd('POST', `${s}/timeouts`, { pageLoad: 8000, script: 20000 });
-      for (const scheme of ['safari-web-extension', 'webkit-extension']) {
+    if (id && args.diagnostics !== 'no') {
+      await wd('POST', `${s}/timeouts`, { pageLoad: 8000, script: 15000 }, 15);
+      for (const scheme of ['safari-web-extension']) {
         const url = `${scheme}://${id}/safari-diagnostics.html?url=${encodeURIComponent(args.url[args.url.length - 1])}`;
-        const nav = await wd('POST', `${s}/url`, { url }, 30);
+        const nav = await wd('POST', `${s}/url`, { url }, 20);
         event('diagnostics page', { url, response: nav });
         await sleep(4);
         const read = await wd('POST', `${s}/execute/sync`, {
           script: "const r = document.getElementById('report'); return JSON.stringify({ href: location.href, verdict: [...document.querySelectorAll('#verdict li')].map((li) => li.className + ': ' + li.textContent), report: r ? r.value.split('\\n') : null });",
           args: [],
-        }, 30);
+        }, 20);
+        screenshot('diagnostics');
         try {
           const page = JSON.parse(read.value);
           if (page.report) {
@@ -168,7 +186,8 @@ async function main() {
     result.fatal = String(e && e.message || e);
     event('fatal', result.fatal);
   } finally {
-    if (sessionId) await wd('DELETE', `/session/${sessionId}`, undefined, 30);
+    if (result.fatal) screenshot('fatal');
+    if (sessionId) await wd('DELETE', `/session/${sessionId}`, undefined, 20);
     driver.kill();
     result.driverLog = driverLog.split('\n').slice(-40);
     save();

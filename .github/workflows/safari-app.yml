@@ -34,6 +34,8 @@ jobs:
           node --version
           networksetup -listallnetworkservices || true
       - name: Run the extension in Safari
+        env:
+          BPC_APP_FIRST_RUN: '1'
         run: safari/engine/safari-app.sh build/safari/app-test
       - name: Upload results
         if: always()
@@ -44,4 +46,5 @@ jobs:
             build/safari/app-test/*.json
             build/safari/app-test/*.jsonl
             build/safari/app-test/*.log
+            build/safari/app-test/*.png
           if-no-files-found: warn
