@@ -2,11 +2,14 @@
 
 这个目录把仓库根目录里的 Chrome 版发布包（`bypass-paywalls-chrome-clean-master.zip`）构建成 Safari Web Extension，原始发布文件不做任何改动。
 
-> **当前状态**：构建脚本和兼容层已在模拟的 Safari 环境中通过测试，CI 也能用 Xcode 打包出 macOS/iOS 应用；但**还没有在真实的 Safari 里实际验证过**，第一次安装后请按文末的「验证清单」检查一遍。
+> **当前状态**：扩展已在 **WebKit 真实的扩展引擎**里跑通（CI 的 macOS 机器，系统自带的 WebKit 和新版 Safari 自带的 WebKit 各跑一遍）：伪装 Googlebot 的请求头、屏蔽付费墙脚本、注入内容脚本都按预期生效，详见文末「测试」。Safari 应用本身（界面、权限弹窗、安装流程）无法在 CI 里自动测试，所以装好后仍建议按「验证清单」看一遍。
+>
+> 2026-11 之前打包的版本在 Safari 里**完全不起作用**，原因见「早期版本为什么不起作用」。请更新到最新的构建。
 
 ## 系统要求
 
 - macOS 上的 Safari 16.4 或更新版本（需要 declarativeNetRequest 修改请求头的能力），建议使用 Safari 18.4 以上
+- iPhone / iPad：iOS / iPadOS 16.4 或更新版本
 - 生成 `.app` 需要 Xcode；只想临时试用、且 Safari 较新时，可以不用 Xcode（见方式 A）
 - 构建脚本需要 Node.js 18+ 和 `unzip`（macOS 自带）
 
@@ -65,7 +68,7 @@ xattr -dr com.apple.quarantine "Bypass Paywalls Clean.app"
 
 ### iOS / iPadOS
 
-需要 iOS/iPadOS 16.4 或更新版本。iOS 只能安装签过名的 App，所以下面两种方式都要用你自己的 Apple ID 或开发者证书签名。免费 Apple ID 的签名 7 天后过期，每台设备最多同时装约 3 个这样签名的 App；这个 App 带一个扩展，很可能占其中 2 个。
+iOS 只能安装签过名的 App，所以下面两种方式都要用你自己的 Apple ID 或开发者证书签名。免费 Apple ID 的签名 7 天后过期，每台设备最多同时装约 3 个这样签名的 App；这个 App 带一个扩展，很可能占其中 2 个。
 
 **用 CI 生成的 ipa（不需要 Mac）**
 
@@ -92,6 +95,13 @@ safari/xcode/build-app.sh build/safari/xcode ios build/safari/dd
 safari/xcode/make-ipa.sh build/safari/dd build/safari/Bypass-Paywalls-Clean-unsigned.ipa
 ```
 
+### 更新到新的构建
+
+- **macOS**：先完全退出 Safari，**删掉旧的 `Bypass Paywalls Clean.app`**（包括「下载」文件夹里以前解压出来的副本，并清空废纸篓），再放入新的 App 并打开一次，然后重新打开 Safari。电脑上同时留着新旧两份 App 时，Safari 可能继续加载旧的那份扩展。每次构建的 App 都带有递增的构建号（App 菜单「关于」窗口里版本号后面括号中的数字，诊断页里也有），可以用来区分。
+- **iPhone / iPad**：用同一个 Apple ID 直接安装新的 ipa 覆盖旧的，然后打开一次 App。
+- 不需要清除扩展的数据。旧版本留下的设置会在新版第一次启动时自动修正：从未初始化的站点列表会被初始化；被旧版误停用的站点（名称里带重音字母的 39 个，如 Télérama.fr、El Español）会重新启用，除非你已经把站点列表精简过。
+- 更新后可以在「Safari 诊断」页确认 Safari 实际加载的是哪一份：报告里的 `safari build` 一行有构建号和对应的 Git 提交。
+
 ## 3. 授权网站访问（必须，否则完全不起作用）
 
 Safari 默认不允许扩展访问任何网站。没有授权的网站上，Safari 不会把网页地址告诉扩展，也不允许它注入脚本，所以扩展什么都做不了。修改请求头（Googlebot UA、Referer 等）和清除 Cookie 也同样需要授权。
@@ -101,12 +111,25 @@ Safari 默认不允许扩展访问任何网站。没有授权的网站上，Safa
 
 改完后刷新新闻页面。只点「允许一天」的话，第二天会失效。
 
+**无痕浏览窗口**里 Safari 默认不运行扩展：需要在同一个扩展设置页里另外打开「在无痕浏览中允许」。
+
 ## 排查问题：Safari 诊断页
 
 在要测试的新闻网站上点开扩展图标，点弹窗底部的「Safari 诊断」，会打开一个诊断页（iPhone 上也能用）：
 
 - **结论**：直接指出问题，例如没有网站权限、选项里没有启用站点、后台脚本没有运行、脚本没有注入到当前页面
-- **详细信息**：Safari 版本、已授权的网站、启用的站点数、实际装上的规则数、后台报错、当前页面的检测结果。点「复制报告」可以把全部内容发给开发者
+- **详细信息**：Safari 版本、实际加载的构建（`safari build`）、已授权的网站、启用的站点数、实际装上的规则数、后台报错、当前页面的检测结果。点「复制报告」可以把全部内容发给开发者
+
+## 早期版本为什么不起作用
+
+2026-11 之前的构建在 macOS 和 iOS 的 Safari 里都完全不起作用，即使授权了网站访问也一样。原因是 Safari 的四个与 Chrome 不同、而且事先查不到文档的行为，都是把扩展放进真实的 WebKit 引擎里运行之后才发现的：
+
+1. **Safari 拒绝修改 `X-Forwarded-For` 等请求头**。它只接受一份固定名单里的请求头，而且只要有一条规则不合格就拒绝整批规则。伪装 Googlebot 的规则同时设置 User-Agent、Referer 和 `X-Forwarded-For`，结果整条规则被丢掉，Googlebot 的 User-Agent 根本没发出去。
+2. **规则悄悄被回滚**。默认设置下，通用的付费墙脚本规则带着一个空的「排除域名」列表。Chrome 把空列表当作「不排除」；Safari 能接收这样的规则，但随后编译整个规则集失败，于是恢复成更新前的规则（也就是没有规则），却仍然向扩展报告「成功」。
+3. **Safari 启动时首次加载的扩展收不到安装事件**。扩展靠这个事件启用默认站点，于是站点列表一直是空的。在 iPhone / iPad 上先在「设置」里启用扩展、再打开 Safari，几乎必然遇到。
+4. **后台脚本被当成 Latin-1 编码读取**。站点名里带重音字母的 40 个站点在后台变成乱码，选项页（按 UTF-8 读取同一个文件）认不出它们，而选项页每次打开都会自动保存，于是其中 39 个站点被停用。
+
+四个问题都已修复，并且各有对应的自动测试（见「测试」）。
 
 ## 和 Chrome 版的区别（构建时自动完成）
 
@@ -116,26 +139,35 @@ Safari 默认不允许扩展访问任何网站。没有授权的网站上，Safa
 | Safari 没有 offscreen 文档（Chrome 版用它解析抓取到的文章 HTML） | 后台改为非常驻页面（有 `DOMParser`），由 `bpcSafari.offscreenParse()` 在后台页解析 |
 | Safari 18.4 以前不认识 `initiatorDomains` / `excludedInitiatorDomains` | 自动改成 `domains` / `excludedDomains` |
 | WebKit 的正则不支持 `\|`、`{n,m}`、`\d`、`\w` 等写法；而规则是整批提交的，一条不合法整批都会被拒 | 把这些正则改写成一条或多条等价写法，每条单独成为一条规则；如果 Safari 仍拒绝整批，就对半拆分重试，只跳过被拒的那几条 |
+| Safari 只允许修改固定名单里的请求头，名单里没有 `X-Forwarded-For` 和个别站点用的自定义请求头 | 只去掉 Safari 不接受的那个请求头，规则的其余部分（User-Agent、Referer、Cookie）照常生效；被拒的请求头会记下来，以后不再重试 |
+| 带空「排除域名」列表的规则让 Safari 编译规则集失败，并悄悄恢复旧规则 | 去掉空列表。另外每次更新规则都附带一条标记规则，更新后检查它是否真的生效；如果被回滚，就对半拆分找出 Safari 编译不了的规则并跳过 |
+| Safari 启动时首次加载的扩展收不到安装事件，而每次重新启用扩展又会重复收到 | 首次设置（启用默认站点）改为每个 Safari 配置只做一次，不依赖这个事件 |
+| 已发布的 Safari 把后台脚本当成 Latin-1 读取，非 ASCII 字符变成乱码 | 构建时把所有脚本里的非 ASCII 字符写成 `\uXXXX` 转义，脚本本身是纯 ASCII，按哪种编码读都一样 |
+| 有十几个站点的脚本要注入到网页自己的 JavaScript 环境（`world: "MAIN"`），那里 Safari 没有 `chrome` 对象，脚本第一行就报错 | 这些脚本在找不到 `chrome` / `browser` 时改用空对象，行为与 Chrome 的网页环境一致 |
 | Safari 不支持修改响应头（`responseHeaders`） | 跳过这类规则（见下方「已知限制」） |
 | Chrome 版的 DOMPurify 是空实现 | 换成 Firefox 版发布包里的真实 DOMPurify |
+| Apple 的转换工具每次都生成版本 1.0 (1) 的 App | 用扩展的版本号和递增的构建号，新的 App 一定比旧的「新」 |
 
-以当前版本 4.4.8.4 为例：启用全部站点时，Chrome 版生成 770 条规则；Safari 版实际应用 1081 条（其中 220 条正则规则被改写拆分），跳过 28 条。
+以当前版本 4.4.8.4 为例：启用全部默认站点时，Chrome 版生成 770 条规则；Safari 版实际装上 1080 条（其中 220 条正则规则被改写拆分），外加 1 条用于检查的标记规则，跳过 29 条。
 
 ## 已知限制
 
 - **28 个站点无法屏蔽内联脚本**：Chrome 版通过修改响应头注入 CSP 来屏蔽这些站点的内联脚本，Safari 不支持这种做法。这些站点的其他规则照常生效，但效果可能不如 Chrome。涉及的站点：cleveland.com、lehighvalleylive.com、mlive.com、nj.com、pennlive.com、silive.com、syracuse.com、anandabazar.com、freitag.de、dwell.com、elpais.com、lastampa.it、inews.co.uk、topagrar.com、nd.nl、ogj.com、revistaoeste.com、rugbypass.com、straitstimes.com、telegram.hr、bizjournals.com、epoch.org.il、independent.co.uk、the-independent.com、theintercept.com、timesofindia.indiatimes.com、vn.at、ynet.co.il
+- **不能伪造来源 IP 和 App 请求头**：Safari 不允许扩展设置 `X-Forwarded-For`。伪装 Googlebot 的 60 条规则在 Safari 上只是少了这一项（User-Agent 和 Referer 照常发送），大多数网站不受影响；nationalgeographic.com 那条只设置 `X-Forwarded-For` 的规则被整条跳过。haaretz.com、haaretz.co.il、themarker.com 和 New York Post（nypost.djservices.io）的规则依赖手机 App 的自定义请求头，这一部分在 Safari 上不生效。
 - **不会自动更新扩展本身**：上游发布新版后，需要更新仓库里的发布包并重新构建。弹窗里的「有新版本」提示链接的是 Chrome 版下载页。如果在选项里开启了在线更新站点规则，站点规则仍会从 gitflic 更新。
 - Safari 18 以前，扩展无法读取或删除 HttpOnly Cookie。
-- 无痕浏览模式下，Safari 只支持 spanning 模式（Chrome 版用的是 split），需要在 Safari 扩展设置里单独允许无痕浏览。
-- 修改 `Cookie` 等请求头、`world: MAIN` 脚本注入等行为，只能在真实 Safari 中确认。万一 Safari 拒绝某类规则，兼容层只会跳过被拒的规则，不会影响其他规则。
+- 无痕浏览模式下，Safari 只支持 spanning 模式（Chrome 版用的是 split），并且需要在 Safari 扩展设置里单独允许无痕浏览。
+- Safari 每次启动后要重新装载规则，启动后最初一两秒内打开的页面可能还没有规则。
 
 ## 验证清单（第一次安装后）
 
 1. 确认已按第 3 节授权网站访问
-2. 在一个支持的新闻网站上打开「Safari 诊断」，结论里应该是「扩展的脚本已注入到当前页面」
-3. （macOS，可选）Safari 开发 菜单 → Web Extension Background Content → Bypass Paywalls Clean，打开后台页的 Web 检查器。控制台里应该能看到一行 `BPC Safari: 770 rules requested, 1081 applied (...)`（4.4.8.4 启用全部站点时的数字，随版本和启用的站点变化）；执行 `bpcSafari.report.lastAddCall.droppedRules` 可以查看具体跳过了哪些规则
+2. 在一个支持的新闻网站上打开「Safari 诊断」，结论里应该是「扩展的脚本已注入到当前页面」，详细信息里 `session rules` 的 `total` 应该在 1000 以上（启用全部默认站点时是 1080）
+3. （macOS，可选）Safari 开发 菜单 → Web Extension Background Content → Bypass Paywalls Clean，打开后台页的 Web 检查器。控制台里应该能看到一行 `BPC Safari: 770 rules requested, 1080 applied (...)`（4.4.8.4 启用全部默认站点时的数字，随版本和启用的站点变化）；执行 `bpcSafari.report.lastAddCall.droppedRules` 可以查看具体跳过了哪些规则
 
 ## 测试
+
+### 模拟环境里的测试（任何系统都能跑）
 
 ```bash
 node --test --test-concurrency=1 safari/test/*.test.mjs
@@ -148,10 +180,29 @@ node --test --test-concurrency=1 safari/test/*.test.mjs
 - 改写前后的正则匹配完全相同的 URL（用随机样本和 JS 正则引擎核对）；
 - 切换站点后不留下残余的改写规则；
 - 有网站权限时，内容脚本的注入和 Chrome 版完全一致；没有权限时（Safari 给的网址为空）不会注入；
-- 诊断页在「没有网站权限」「一切正常」「后台没有响应」等情况下给出正确的结论；
-- 模拟 Safari 拒绝某类规则时，其余规则照常生效。
+- 上面「早期版本为什么不起作用」里的四种 Safari 行为：被拒的请求头、被悄悄回滚的更新、没有安装事件、后台脚本按 Latin-1 读取；
+- 旧版本留下的站点列表（乱码的名称、被停用的站点）会被修正，用户自己精简过的列表保持不变；
+- 注入网页环境的脚本在没有 `chrome` 对象的页面里能正常启动；
+- 诊断页在「没有网站权限」「一切正常」「后台没有响应」等情况下给出正确的结论。
 
-`safari/test/webkit-rules.mjs` 是根据 Apple 文档、MDN 兼容性数据和 WebKit 内容拦截器正则子集整理出的**近似**模型，故意定得偏严。真实 Safari 运行时会用自己的 `isRegexSupported()` 再判断一次。
+`safari/test/webkit-rules.mjs` 是根据 Apple 文档、MDN 兼容性数据、WebKit 源码和引擎测试的结果整理出的**近似**模型，故意定得偏严。真实 Safari 运行时会用自己的 `isRegexSupported()` 再判断一次。
+
+### 在真实的 WebKit 引擎里测试（需要 macOS 15.4 以上）
+
+```bash
+safari/engine/run.sh
+```
+
+GitHub Actions 的「Safari engine test」工作流在每次改动后自动运行它。这个测试用 WebKit 公开的 `WKWebExtension` 接口（Safari 的扩展功能就建在它上面）加载构建好的扩展，然后打开几个受支持网站的本地替身页面，检查真正发生了什么：
+
+- 服务器实际收到的请求头（Googlebot 的 User-Agent、Google 的 Referer、被清空的 Cookie）；
+- 应该被屏蔽的脚本确实没有被请求，对照脚本照常加载；
+- 内容脚本确实注入并修改了页面（包括注入到网页自己的 JavaScript 环境的那一类）；
+- 扩展自己以为装上的规则数和 WebKit 里实际存在的规则数一致；
+- 没有网站权限时、在无痕窗口里，页面完全不受影响；不受支持的网站完全不受影响；
+- 扩展在「Safari 运行中启用」和「随 Safari 启动加载」两种情况下结果相同。
+
+测试页面由本机的代理提供（`safari/engine/server.mjs`），不会访问真实的网站。机器上的 Safari 比系统新时（Safari 自带一份更新的 WebKit），主要场景会用那份 WebKit 再跑一遍。
 
 ## 同步上游新版本
 
@@ -173,8 +224,9 @@ git merge upstream/main
 
 ## 文件说明
 
-- `build.mjs`：构建脚本（解压 Chrome 版 → 打补丁 → 生成 Safari manifest）
+- `build.mjs`：构建脚本（解压 Chrome 版 → 打补丁 → 生成 Safari manifest → 把脚本转成纯 ASCII）
 - `src/safari-compat.js`：兼容层，作为第一个后台脚本加载
 - `src/safari-diagnostics.html`、`src/safari-diagnostics.js`、`src/safari-popup.js`：诊断页和弹窗里的入口链接
-- `xcode/convert.sh`、`xcode/build-app.sh`、`xcode/make-ipa.sh`：生成 Xcode 工程、构建应用、打包未签名 ipa（CI 也调用这些脚本）
-- `test/`：测试（`harness.mjs` 模拟浏览器 API，`webkit-rules.mjs` 是 Safari 规则模型，`sampler.mjs` 做正则等价性采样）
+- `xcode/convert.sh`、`xcode/set-version.mjs`、`xcode/build-app.sh`、`xcode/make-ipa.sh`：生成 Xcode 工程、写入版本号、构建应用、打包未签名 ipa（CI 也调用这些脚本）
+- `test/`：模拟环境里的测试（`harness.mjs` 模拟浏览器 API，`webkit-rules.mjs` 是 Safari 规则模型，`sampler.mjs` 做正则等价性采样）
+- `engine/`：真实 WebKit 引擎里的测试（`host.m` 是加载扩展的宿主程序，`server.mjs` 是本地替身网站，`run.sh` 运行全部场景，`report.mjs` 汇总并检查结果）
