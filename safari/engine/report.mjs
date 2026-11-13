@@ -100,6 +100,12 @@ function scenario(name, expect, { optional = false } = {}) {
   const app = expect === 'app';
   if (app) console.log(`  Safari ${JSON.stringify(result.capabilities)}, options ${JSON.stringify(result.options)}`);
   else console.log(`  ${result.os}, WebKit ${result.webkit}, options ${JSON.stringify(result.options)}`);
+  if (result.skipped) {
+    // The machine could not run the test at all; that says nothing about the extension.
+    console.log(`  NOT RUN: ${result.skipped}`);
+    console.log(`::warning title=Safari app test not run::${result.skipped}`);
+    return;
+  }
   if (result.fatal) {
     console.log(`  FATAL: ${result.fatal}`);
     for (const e of result.events || []) console.log(`      ${e.t}s ${e.type} ${JSON.stringify(e.detail).slice(0, 600)}`);
@@ -120,17 +126,19 @@ function scenario(name, expect, { optional = false } = {}) {
     const url = new URL(page.requested);
     const site = SITES[url.hostname] || { scripts: {}, blocked: [] };
     const mine = requests.filter((r) => r.host === url.hostname);
-    const doc = mine.find((r) => r.path === url.pathname);
+    // A second visit to a site has a query string of its own.
+    const doc = mine.find((r) => r.path === url.pathname + url.search);
+    const label = url.hostname + (page.phase ? ` (${page.phase})` : '');
     const fetched = Object.fromEntries(Object.entries(site.scripts).map(([n, src]) => [n, mine.some((r) => r.path === src)]));
     const p = page.page || {};
     const cw = page.contentWorld || {};
-    console.log(`\n  -- ${url.hostname} (${site.rule || '?'})`);
+    console.log(`\n  -- ${label}: ${site.rule || '?'}`);
     console.log(`     finished=${page.finished} error=${page.navigationError || '-'} hasAccess=${page.hasAccess}`);
     console.log(`     document request: ${doc ? JSON.stringify({ userAgent: doc.userAgent, referer: doc.referer, cookie: doc.cookie, xForwardedFor: doc.xForwardedFor }) : 'NOT RECEIVED'}`);
     console.log(`     scripts fetched: ${JSON.stringify(fetched)} | ran in page: ${JSON.stringify(p.ran)}`);
     console.log(`     page: ${p.error ? 'ERROR ' + p.error : JSON.stringify({ probes: p.probes, cookie: p.cookie })}`);
     console.log(`     page world: ${JSON.stringify(p.world)}`);
-    if (app) console.log(`     style elements added to the page: ${JSON.stringify(p.styles)}`);
+    if (app) console.log(`     style elements the content script added: ${JSON.stringify(p.styles)}`);
     else console.log(`     content world: ${JSON.stringify(cw)}`);
     // A WebDriver session cannot look into the extension's content world; the
     // style elements the content script adds to every supported page can be seen.
@@ -140,28 +148,28 @@ function scenario(name, expect, { optional = false } = {}) {
 
     if (!expect) continue;
     const supported = url.hostname !== 'www.bpc-control.test';
-    check(name, page.finished && !page.navigationError && !!doc, `${url.hostname}: page loaded`);
+    check(name, page.finished && !page.navigationError && !!doc, `${label}: page loaded`);
     if ((expect === 'working' || app) && supported) {
       for (const [header, pattern] of Object.entries(EXPECTED_HEADERS[url.hostname] || {}))
-        check(name, !!doc && pattern.test(doc[header] || ''), `${url.hostname}: document request has ${header} matching ${pattern} (got ${JSON.stringify(doc && doc[header])})`);
+        check(name, !!doc && pattern.test(doc[header] || ''), `${label}: document request has ${header} matching ${pattern} (got ${JSON.stringify(doc && doc[header])})`);
       for (const blocked of site.blocked)
-        check(name, fetched[blocked] === false && !(p.ran || {})[blocked], `${url.hostname}: script "${blocked}" is blocked`);
-      check(name, fetched.ok === true && (p.ran || {}).ok === '1', `${url.hostname}: control script still loads`);
+        check(name, fetched[blocked] === false && !(p.ran || {})[blocked], `${label}: script "${blocked}" is blocked`);
+      check(name, fetched.ok === true && (p.ran || {}).ok === '1', `${label}: control script still loads`);
       if (site.world === 'MAIN') {
         const world = p.world || {};
-        check(name, world.contentScript === true && world.csLocal === true, `${url.hostname}: content scripts injected into the page world`);
-        check(name, world.extChromium === true, `${url.hostname}: the page-world scripts take the Chromium code path`);
-      } else check(name, injected, `${url.hostname}: content script injected`);
+        check(name, world.contentScript === true && world.csLocal === true, `${label}: content scripts injected into the page world`);
+        check(name, world.extChromium === true, `${label}: the page-world scripts take the Chromium code path`);
+      } else check(name, injected, `${label}: content script injected`);
       for (const probe of site.removed || [])
-        check(name, !!p.probes && !(probe in p.probes), `${url.hostname}: content script removed the "${probe}" element`);
+        check(name, !!p.probes && !(probe in p.probes), `${label}: content script removed the "${probe}" element`);
       if (url.hostname === 'www.hola.com')
-        check(name, p.probes && p.probes.ad && p.probes.ad.display === 'none', `${url.hostname}: content script hid the advert (display=${p.probes && p.probes.ad && p.probes.ad.display})`);
+        check(name, p.probes && p.probes.ad && p.probes.ad.display === 'none', `${label}: content script hid the advert (display=${p.probes && p.probes.ad && p.probes.ad.display})`);
     } else {
       // Unsupported site, or the extension has no access: nothing may change.
-      check(name, !!doc && !GOOGLEBOT.test(doc.userAgent || '') && !/google|drudge/.test(doc.referer || ''), `${url.hostname}: request headers untouched`);
-      check(name, !injected && !(p.world && p.world.contentScript), `${url.hostname}: no content script`);
+      check(name, !!doc && !GOOGLEBOT.test(doc.userAgent || '') && !/google|drudge/.test(doc.referer || ''), `${label}: request headers untouched`);
+      check(name, !injected && !(p.world && p.world.contentScript), `${label}: no content script`);
       if (!supported)
-        check(name, Object.values(fetched).every(Boolean), `${url.hostname}: no script blocked`);
+        check(name, Object.values(fetched).every(Boolean), `${label}: no script blocked`);
     }
   }
 
@@ -173,6 +181,11 @@ function scenario(name, expect, { optional = false } = {}) {
 
   if (expect === 'working') {
     const bg = result.backgroundAtEnd || {};
+    if (result.options && result.options.idle) {
+      check(name, result.backgroundUnloadedWhileIdle === true, `the background page was unloaded while idle (${result.options.idle} s), so the pages above had to wake it up`);
+      const last = (bg.compat && bg.compat.lastAddCall) || {};
+      check(name, last.batchRejected === false, `a later start of the background page installs the rules without a refused attempt (${JSON.stringify(last.batchRejected)})`);
+    }
     check(name, bg.backgroundLoaded === true, 'background scripts loaded');
     check(name, bg.enabledSites > 500, `sites are enabled (${bg.enabledSites})`);
     check(name, bg.sessionRules > 700, `blocking/header rules are installed (${bg.sessionRules})`);
@@ -191,12 +204,20 @@ function scenario(name, expect, { optional = false } = {}) {
 }
 
 if (appRun) {
-  // The real Safari app, driven through safaridriver.
+  // The real Safari app, driven through safaridriver (safari-app.sh).
   scenario('safari-app', 'app');
+  const app = readJSON(path.join(dir, 'safari-app.json')) || {};
+  if (!app.skipped && !app.fatal) {
+    console.log('\n=== Safari app ===');
+    check('safari-app', (app.questions || 0) >= 1, `Safari asked for website access and the question was answered (${app.questions || 0})`);
+    const later = (app.pages || []).filter((p) => p.phase);
+    if (app.options && app.options.idle) check('safari-app', later.length >= 2 && later.every((p) => p.finished), `pages were visited again after ${app.options.idle} s without events (${later.length})`);
+  }
 } else {
   scenario('enabled', 'working');
   scenario('legacy', 'working');
   scenario('launch', 'working');
+  scenario('idle', 'working');
   scenario('noaccess', 'untouched');
   scenario('private', 'untouched');
   // With the WebKit that ships inside a newer Safari, when the machine has one.

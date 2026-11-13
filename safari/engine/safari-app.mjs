@@ -3,33 +3,38 @@
 // extension loaded, and records what happens on the local stand-in sites.
 //
 //   node safari/engine/safari-app.mjs --extension <dir> --out <result.json>
-//        [--driver-port 4477] [--wait 10] [--settle 5] [--diagnostics no]
-//        --url <url> [--url <url> ...]
+//        [--driver-port 4477] [--wait 10] [--settle 5]
+//        --url <url> [--url <url> ...] [--idle 40 --again <url> ...]
 //
 // Started by safari-app.sh, which also starts the stand-in sites and points
 // the system at them. Safari loads the extension through WebDriver's "Load
-// WebExtension" command, which Safari supports from version 18.4 on macOS.
+// WebExtension" command (Safari 18.4 or later on macOS), as an unpacked
+// extension that lives as long as the session.
 //
 // Unlike the engine test (host.m), nothing here stands in for Safari: tabs,
 // windows, permissions and events are Safari's own. A WebDriver session only
 // reaches the page, so the checks are about what a page and the server see.
+//
+// --idle leaves Safari alone for that many seconds after the first round of
+// pages. Safari unloads the extension's background page after 30 seconds
+// without events; the pages given with --again then have to wake it up.
 
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 
-const args = { 'driver-port': '4477', settle: '5', wait: '10', url: [] };
+const args = { 'driver-port': '4477', settle: '5', wait: '10', idle: '0', url: [], again: [] };
 for (let i = 2; i < process.argv.length; i += 2) {
   const key = process.argv[i].replace(/^--/, '');
-  if (key === 'url') args.url.push(process.argv[i + 1]);
+  if (key === 'url' || key === 'again') args[key].push(process.argv[i + 1]);
   else args[key] = process.argv[i + 1];
 }
 if (!args.extension || !args.out || !args.url.length) {
-  console.error('usage: safari-app.mjs --extension <dir> --out <result.json> [--driver-port 4477] [--settle 5] --url <url> ...');
+  console.error('usage: safari-app.mjs --extension <dir> --out <result.json> [--driver-port 4477] [--wait 10] [--settle 5] --url <url> ... [--idle 40 --again <url> ...]');
   process.exit(2);
 }
 
 const started = Date.now();
-const result = { options: { settle: Number(args.settle) }, events: [], pages: [] };
+const result = { options: { settle: Number(args.settle), idle: Number(args.idle) }, events: [], pages: [] };
 const event = (type, detail) => {
   const e = { t: Math.round((Date.now() - started) / 100) / 10, type, detail };
   result.events.push(e);
@@ -46,13 +51,13 @@ const screenshot = (name) => {
   }
 };
 
-// Safari asks the user before the extension may touch a website, with a sheet
+// Safari asks the user before the extension may touch a website, in an alert
 // that also stops the WebDriver session. The first one comes right after the
 // first start, when the extension looks for updates on gitflic.ru. This
-// answers such a sheet the way the README tells users to: remember the choice
+// answers the question the way the README tells users to: remember the choice
 // for other websites and always allow. It needs the accessibility permission
 // that CI machines give to osascript.
-const ANSWER_SHEETS = `
+const ANSWER_QUESTIONS = `
 on answerIn(theArea, placeName)
   tell application "System Events"
     repeat with theChoice in {"Always Allow on Every Website", "Always Allow", "Continue Session"}
@@ -78,7 +83,6 @@ end answerIn
 tell application "System Events"
   if not (exists process "Safari") then return "none"
   tell process "Safari"
-    set seenWindows to ""
     repeat with theWindow in windows
       -- The question is an alert window of its own, or a sheet on a window.
       set outcome to my answerIn(contents of theWindow, "window")
@@ -87,27 +91,27 @@ tell application "System Events"
         set outcome to my answerIn(sheet 1 of theWindow, "sheet")
         if outcome is not "" then return outcome
       end if
-      try
-        set seenWindows to seenWindows & "[" & (subrole of theWindow) & " '" & (name of theWindow) & "' buttons: " & ((name of buttons of theWindow) as text) & "] "
-      end try
     end repeat
-    return "windows: " & seenWindows
   end tell
 end tell
+return "none"
 `;
 let answering = false;
-let lastSheet = '';
-function answerSheets() {
+let lastAnswer = '';
+function answerQuestions() {
   if (answering) return;
   answering = true;
-  execFile('osascript', ['-e', ANSWER_SHEETS], { timeout: 12000 }, (error, stdout, stderr) => {
+  execFile('osascript', ['-e', ANSWER_QUESTIONS], { timeout: 12000 }, (error, stdout, stderr) => {
     answering = false;
     const out = String(stdout || '').trim();
     const text = error ? 'osascript: ' + String(stderr || error.message).trim().slice(0, 300) : out;
-    // Logged when it changes: a click, an error, or the windows Safari has.
-    if (text && text !== 'none' && text !== lastSheet) event('sheet', text.slice(0, 700));
-    if (text.startsWith('clicked')) screenshot(`sheet${result.events.filter((e) => e.type === 'sheet').length}`);
-    lastSheet = text;
+    // Logged when it changes: a click or an error.
+    if (text && text !== 'none' && text !== lastAnswer) {
+      event('question', text.slice(0, 700));
+      result.questions = (result.questions || 0) + (text.startsWith('clicked') ? 1 : 0);
+      if (text.startsWith('clicked')) screenshot(`answered${result.questions}`);
+    }
+    lastAnswer = text;
   });
 }
 
@@ -160,10 +164,8 @@ async function main() {
     // not running
   }
   const driver = spawn('safaridriver', ['-p', args['driver-port']], { stdio: ['ignore', 'pipe', 'pipe'] });
-  const sheets = setInterval(answerSheets, 2000);
-  let driverLog = '';
-  driver.stdout.on('data', (d) => { driverLog += d; });
-  driver.stderr.on('data', (d) => { driverLog += d; });
+  driver.on('error', (e) => event('safaridriver', String(e && e.message || e)));
+  const questions = setInterval(answerQuestions, 2000);
   let sessionId = null;
   try {
     let status = null;
@@ -172,42 +174,53 @@ async function main() {
       status = await wd('GET', '/status', undefined, 5);
     }
     event('safaridriver status', status);
-    if (!status || status.status !== 200) throw new Error('safaridriver did not start');
+    if (!status || status.status !== 200) {
+      result.skipped = 'safaridriver did not start on this machine';
+      return;
+    }
 
     const session = await wd('POST', '/session', { capabilities: { alwaysMatch: { browserName: 'safari' } } }, 90);
-    if (failed(session)) throw new Error('no WebDriver session: ' + JSON.stringify(session.value));
+    if (failed(session)) {
+      result.skipped = 'Safari gave no WebDriver session: ' + JSON.stringify(session.value).slice(0, 300);
+      return;
+    }
     sessionId = session.value.sessionId;
     result.capabilities = session.value.capabilities;
     event('session', result.capabilities);
     const s = `/session/${sessionId}`;
 
-    // Load WebExtension: {type: "path" | "archivePath" | "base64", value}. The
-    // other spelling is tried too, in case this Safari predates the final draft.
+    // Load WebExtension. Safari 27 wants {type: "path", path}; the proposed
+    // standard says {type: "path", value}.
     let loaded = null;
-    for (const body of [{ type: 'path', value: args.extension }, { type: 'path', path: args.extension }]) {
+    let refusal = null;
+    for (const body of [{ type: 'path', path: args.extension }, { type: 'path', value: args.extension }]) {
       const res = await wd('POST', `${s}/webextension`, body, 90);
       event('load extension', { body, response: res });
       if (!failed(res)) {
         loaded = res.value;
         break;
       }
+      refusal = res;
     }
     result.extension = loaded;
     if (!loaded) {
-      result.fatal = 'Safari did not load the extension through WebDriver';
+      // An unknown command is an older Safari; anything else is about the extension.
+      const text = JSON.stringify(refusal && refusal.value).slice(0, 300);
+      if (refusal && (refusal.status === 404 || /unknown command|unsupported operation/i.test(text))) result.skipped = 'this Safari cannot load an extension through WebDriver: ' + text;
+      else result.fatal = 'Safari did not load the extension: ' + text;
       return;
     }
-    event('windows right after loading', (await wd('GET', `${s}/window/handles`, undefined, 15)).value);
     // First start of the extension: default sites, rules, and Safari's question
-    // about website access (see ANSWER_SHEETS).
+    // about website access (see ANSWER_QUESTIONS).
     await sleep(Number(args.wait));
     screenshot('loaded');
     event('windows after the first start', (await wd('GET', `${s}/window/handles`, undefined, 15)).value);
-
     await wd('POST', `${s}/timeouts`, { pageLoad: 20000, script: 15000 }, 15);
+
     let failures = 0;
-    for (const url of args.url) {
+    const visit = async (url, phase) => {
       const page = { requested: url };
+      if (phase) page.phase = phase;
       const nav = await wd('POST', `${s}/url`, { url }, 30);
       page.finished = !failed(nav);
       if (!page.finished) page.navigationError = JSON.stringify(nav.value).slice(0, 300);
@@ -223,51 +236,26 @@ async function main() {
       save();
       if (result.pages.length === 1 || !page.finished) screenshot(`page${result.pages.length}`);
       failures = page.finished ? 0 : failures + 1;
-      if (failures >= 2) {
-        result.fatal = 'Safari stopped answering WebDriver commands';
-        return;
-      }
-    }
+      if (failures >= 2) throw new Error('Safari stopped answering WebDriver commands');
+    };
+    for (const url of args.url) await visit(url);
 
-    // The extension's own diagnostics page shows what Safari granted and what
-    // the background did. Safari may not report the end of this page load.
-    const id = typeof loaded === 'string' ? loaded : loaded && (loaded.extensionId || loaded.extension || loaded.identifier || loaded.id);
-    if (id && args.diagnostics !== 'no') {
-      await wd('POST', `${s}/timeouts`, { pageLoad: 8000, script: 15000 }, 15);
-      for (const scheme of ['safari-web-extension']) {
-        const url = `${scheme}://${id}/safari-diagnostics.html?url=${encodeURIComponent(args.url[args.url.length - 1])}`;
-        const nav = await wd('POST', `${s}/url`, { url }, 20);
-        event('diagnostics page', { url, response: nav });
-        await sleep(4);
-        const read = await wd('POST', `${s}/execute/sync`, {
-          script: "const r = document.getElementById('report'); return JSON.stringify({ href: location.href, verdict: [...document.querySelectorAll('#verdict li')].map((li) => li.className + ': ' + li.textContent), report: r ? r.value.split('\\n') : null });",
-          args: [],
-        }, 20);
-        screenshot('diagnostics');
-        try {
-          const page = JSON.parse(read.value);
-          if (page.report) {
-            result.diagnosticsPage = page;
-            break;
-          }
-          event('diagnostics page content', page);
-        } catch (e) {
-          event('diagnostics page not readable', read);
-        }
-      }
+    if (Number(args.idle) > 0 && args.again.length) {
+      event('idle', `${args.idle} s`);
+      await sleep(Number(args.idle));
+      for (const url of args.again) await visit(url, 'after idle');
     }
   } catch (e) {
     result.fatal = String(e && e.message || e);
     event('fatal', result.fatal);
   } finally {
-    clearInterval(sheets);
+    clearInterval(questions);
     if (result.fatal) screenshot('fatal');
     if (sessionId) await wd('DELETE', `/session/${sessionId}`, undefined, 20);
     driver.kill();
-    result.driverLog = driverLog.split('\n').slice(-40);
     save();
   }
 }
 
 await main();
-console.log(`result written to ${args.out}${result.fatal ? ' (' + result.fatal + ')' : ''}`);
+console.log(`result written to ${args.out}${result.fatal ? ' (' + result.fatal + ')' : ''}${result.skipped ? ' (skipped: ' + result.skipped + ')' : ''}`);

@@ -19,7 +19,7 @@ jobs:
   app:
     name: Safari app (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -33,7 +33,12 @@ jobs:
           safaridriver --version || true
           node --version
           networksetup -listallnetworkservices || true
+      - name: Run the extension in WebKit
+        env:
+          BPC_ENGINE_TRUST_CERT: '1'
+        run: safari/engine/run.sh build/safari/engine
       - name: Run the extension in Safari
+        if: always()
         run: safari/engine/safari-app.sh build/safari/app-test
       - name: Upload results
         if: always()
@@ -41,6 +46,9 @@ jobs:
         with:
           name: safari-app-${{ matrix.os }}
           path: |
+            build/safari/engine/*.json
+            build/safari/engine/*.jsonl
+            build/safari/engine/*.log
             build/safari/app-test/*.json
             build/safari/app-test/*.jsonl
             build/safari/app-test/*.log
