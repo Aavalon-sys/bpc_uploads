@@ -117,6 +117,36 @@ const BACKGROUND_PATCHES = [
   },
 ];
 
+// For a few sites the extension injects its content scripts into the page's
+// own JavaScript world (world: "MAIN"). Chrome has a `chrome` object there;
+// Safari has neither `chrome` nor `browser` in a page, so the first statement
+// of those scripts threw and nothing ran. In the page world they now get an
+// empty object, which is what they are prepared for (no runtime, no storage),
+// and take the Chromium code path like the rest of the Safari build.
+const PAGE_WORLD_PATCHES = [
+  {
+    file: 'contentScript.js',
+    why: 'content script: no chrome or browser object in the page world of Safari',
+    find: 'var ext_api = chrome || browser;',
+    replace: "var ext_api = (typeof chrome === 'object' && chrome) || (typeof browser === 'object' && browser) || {};",
+    count: 1,
+  },
+  {
+    file: 'contentScript.js',
+    why: 'content script: Chromium code path in the page world too (the user agent of Safari does not say "chrome")',
+    find: "var ext_chromium = window.navigator.userAgent.toLowerCase().includes('chrome');",
+    replace: 'var ext_chromium = true;',
+    count: 1,
+  },
+  {
+    file: 'contentScript_once_var.js',
+    why: 'page-world script: no chrome or browser object in the page world of Safari',
+    find: "var ext_api = (typeof browser === 'object') ? browser : chrome;",
+    replace: "var ext_api = (typeof browser === 'object' && browser) || (typeof chrome === 'object' && chrome) || {};",
+    count: 1,
+  },
+];
+
 // Appended to background.js: puts right a site list stored by an earlier
 // Safari build, then does the first-time setup when no install event arrived
 // (the extension was first loaded while Safari was starting).
@@ -249,6 +279,13 @@ export function build(options = {}) {
       throw new Error('background.js: setDefaultOptions() not found; upstream code changed, update safari/build.mjs');
     bg += BACKGROUND_APPENDIX;
     fs.writeFileSync(bgFile, bg);
+
+    for (const p of PAGE_WORLD_PATCHES) {
+      const file = path.join(args.out, p.file);
+      const res = patch(fs.readFileSync(file, 'utf8'), p.file, p);
+      fs.writeFileSync(file, res.text);
+      applied.push({ patch: p.why, matches: res.matches });
+    }
 
     // Popup: link to the Safari diagnostics page.
     const popupFile = path.join(args.out, 'options', 'popup.html');

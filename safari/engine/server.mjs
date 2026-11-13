@@ -48,6 +48,15 @@ export const SITES = {
     blocked: ['evolok', 'general'],
     body: '<div data-ad-title="test" data-probe="ad">ADVERT (the content script hides this)</div>',
   },
+  'hbr.org': {
+    rule: 'content scripts injected into the page\'s own world (world: "MAIN") remove the paywall',
+    scripts: { ok: '/ok.js?n=ok' },
+    blocked: [],
+    // The site code runs in the page world; the extension's content world stays empty.
+    world: 'MAIN',
+    removed: ['banner', 'paywall'],
+    body: '<div class="persistent-banner" data-probe="banner">BANNER (the content script removes this)</div>\n<div id="paywall-engine" data-probe="paywall">PAYWALL (the content script removes this)</div>',
+  },
   // Not a supported site: the extension must leave it alone.
   'www.bpc-control.test': {
     rule: 'control (unsupported site)',

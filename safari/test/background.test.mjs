@@ -85,7 +85,7 @@ test('Safari build: the patched background uses the compat layer', () => {
   assert.ok(!manifest.permissions.includes('offscreen'));
   assert.equal(manifest.incognito, undefined);
   assert.match(fs.readFileSync(path.join(safariDir, 'lib', 'purify.min.js'), 'utf8'), /DOMPurify \d/);
-  assert.equal(buildResult.info.patches.length, 7);
+  assert.equal(buildResult.info.patches.length, 10);
   assert.match(bg, /if \(details\.reason == "install"\) \{\r?\n\s*bpcSafari\.firstRun\(setDefaultOptions\);\r?\n\s*\} else if \(details\.reason == "update"\)/, 'install handler not patched');
   assert.ok(!bg.includes('ext_api.runtime.openOptionsPage()'));
   assert.match(bg, /setTimeout\(function \(\) \{\n  bpcSafari\.repairSiteNames\(defaultSites\)\.then\(function \(\) \{\n    bpcSafari\.firstRun\(setDefaultOptions\);\n  \}\);\n\}, 1500\);\n$/);
@@ -442,7 +442,7 @@ test('Safari build: every script is free of non-ASCII characters and still parse
   assert.deepEqual(buildResult.info.nonAsciiScripts, []);
   for (const f of ['sites.js', 'contentScript.js']) assert.ok(buildResult.info.asciiScripts.includes(f), f);
   // Only the encoding changed: the scripts of the Chrome release that are not patched read the same.
-  for (const rel of ['sites.js', 'contentScript.js', 'cs_local/contentScript_en.js', 'cs_local/contentScript_fr.js']) {
+  for (const rel of ['sites.js', 'cs_local/contentScript_en.js', 'cs_local/contentScript_fr.js', 'cs_local/contentScript_de.js']) {
     const original = fs.readFileSync(path.join(chromeDir, rel), 'utf8');
     assert.ok(!isAscii(original), `${rel} of the Chrome release is expected to have non-ASCII characters`);
     assert.equal(fs.readFileSync(path.join(safariDir, rel), 'utf8'), asciiJs(original), rel);
@@ -525,4 +525,61 @@ test('Safari build: a site list the user cut down keeps its sites', async () => 
   const run = await runBackground({ extDir: safariDir, flavor: 'safari', safariVersion: [18, 4], fireInstalled: false, settleMs: 3500, initialStore });
   assert.deepEqual(run.errors.map(String), []);
   assert.deepEqual(Object.keys(run.store.sites).sort(), Object.keys(chosen).sort());
+});
+
+// --- Scripts injected into the page's own JavaScript world -----------------
+// For some sites the background injects the content scripts with
+// world: "MAIN". A page in Safari has no `chrome` and no `browser` object.
+
+// A page without extension objects; timers are collected, not run.
+function pageWorld(hostname) {
+  const timers = [];
+  const window = {
+    navigator: { userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15' },
+    location: { hostname, href: `https://${hostname}/2026/01/article`, pathname: '/2026/01/article', search: '', origin: `https://${hostname}` },
+    setTimeout: (fn) => timers.push(fn),
+    clearTimeout: () => {},
+    document: { querySelector: () => null, querySelectorAll: () => [], addEventListener: () => {}, documentElement: {}, head: null, body: null, cookie: '' },
+    addEventListener: () => {},
+  };
+  window.window = window;
+  window.self = window;
+  window.top = window;
+  return { sandbox: vm.createContext(window), timers };
+}
+const runIn = (world, dir, files) => files.forEach((f) => vm.runInContext(fs.readFileSync(path.join(dir, f), 'utf8'), world.sandbox, { filename: f }));
+const PAGE_WORLD_SCRIPTS = [['contentScript.js', 'cs_local/contentScript_en.js'], ['contentScript.js', 'cs_local/contentScript_fr.js'], ['contentScript_once_var.js']];
+
+test('Safari build: the background still injects into the page world for the same sites', () => {
+  const bg = fs.readFileSync(path.join(safariDir, 'background.js'), 'utf8');
+  // The only two places; when upstream adds another script here, it needs the same care.
+  assert.equal((bg.match(/world: "MAIN"|script_world = "MAIN"/g) || []).length, 2);
+  assert.match(bg, /files: \["contentScript_once_var\.js"\],\r?\n\s*injectImmediately: true,\r?\n\s*world: "MAIN"/);
+  assert.match(bg, /files: \[lib_file, "contentScript\.js", cs_local_file\],\r?\n\s*injectImmediately: true,\r?\n\s*world: script_world/);
+});
+
+test('Chrome release: the page-world scripts need a chrome object', () => {
+  for (const files of PAGE_WORLD_SCRIPTS)
+    assert.throws(() => runIn(pageWorld('www.hbr.org'), chromeDir, files), /chrome is not defined/, files.join(' + '));
+});
+
+test('Safari build: the page-world scripts start in a page without chrome and browser', () => {
+  for (const files of PAGE_WORLD_SCRIPTS) {
+    const world = pageWorld('www.hbr.org');
+    assert.doesNotThrow(() => runIn(world, safariDir, files), files.join(' + '));
+    if (files[0] !== 'contentScript.js') continue;
+    // Without a runtime the content script runs its site code right away, like in Chrome's page world.
+    assert.equal(world.sandbox.ext_chromium, true);
+    assert.equal(typeof world.sandbox.cs_default, 'function');
+    assert.equal(world.timers.length, 5);
+    assert.doesNotThrow(() => world.timers.forEach((fn) => fn()));
+  }
+  // In the extension's own world nothing changes: the runtime is found and used.
+  const messages = [];
+  const world = pageWorld('www.hbr.org');
+  world.sandbox.chrome = { runtime: { getManifest: () => ({ key: 'k' }), onMessage: { addListener: (fn) => messages.push(fn) } }, storage: {} };
+  runIn(world, safariDir, PAGE_WORLD_SCRIPTS[0]);
+  assert.equal(world.sandbox.ext_chromium, true);
+  assert.equal(messages.length, 1, 'the content script waits for the background message');
+  assert.equal(world.timers.length, 0);
 });

@@ -467,6 +467,9 @@ static NSString * const kPageProbe = @""
     "for (const a of document.documentElement.attributes) if (a.name.startsWith('data-ran-')) out.ran[a.name.slice(9)] = a.value;"
     "for (const e of document.querySelectorAll('[data-probe]')) out.probes[e.getAttribute('data-probe')] = { display: getComputedStyle(e).display, text: e.textContent.trim().slice(0, 60) };"
     "out.bodyLength = document.body ? document.body.innerText.length : -1;"
+    // For a few sites the extension injects its content scripts into the page's own world.
+    "out.world = { contentScript: typeof ext_chromium !== 'undefined', extChromium: typeof ext_chromium !== 'undefined' ? ext_chromium : null,"
+    "  csLocal: typeof cs_default === 'function', hasChrome: typeof chrome === 'object', hasBrowser: typeof browser === 'object' };"
     "return JSON.stringify(out);";
 
 // Whether the extension's content scripts are present in its content world.

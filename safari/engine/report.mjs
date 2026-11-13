@@ -120,6 +120,7 @@ function scenario(name, expect, { optional = false } = {}) {
     console.log(`     document request: ${doc ? JSON.stringify({ userAgent: doc.userAgent, referer: doc.referer, cookie: doc.cookie, xForwardedFor: doc.xForwardedFor }) : 'NOT RECEIVED'}`);
     console.log(`     scripts fetched: ${JSON.stringify(fetched)} | ran in page: ${JSON.stringify(p.ran)}`);
     console.log(`     page: ${p.error ? 'ERROR ' + p.error : JSON.stringify({ probes: p.probes, cookie: p.cookie })}`);
+    console.log(`     page world: ${JSON.stringify(p.world)}`);
     console.log(`     content world: ${JSON.stringify(cw)}`);
     const later = mine.filter((r) => r.path.startsWith('/ok.js'));
     if (later.length) console.log(`     ok.js request: ${JSON.stringify({ userAgent: later[0].userAgent, referer: later[0].referer, cookie: later[0].cookie })}`);
@@ -133,13 +134,19 @@ function scenario(name, expect, { optional = false } = {}) {
       for (const blocked of site.blocked)
         check(name, fetched[blocked] === false && !(p.ran || {})[blocked], `${url.hostname}: script "${blocked}" is blocked`);
       check(name, fetched.ok === true && (p.ran || {}).ok === '1', `${url.hostname}: control script still loads`);
-      check(name, cw.contentScript === true, `${url.hostname}: content script injected`);
+      if (site.world === 'MAIN') {
+        const world = p.world || {};
+        check(name, world.contentScript === true && world.csLocal === true, `${url.hostname}: content scripts injected into the page world`);
+        check(name, world.extChromium === true, `${url.hostname}: the page-world scripts take the Chromium code path`);
+      } else check(name, cw.contentScript === true, `${url.hostname}: content script injected`);
+      for (const probe of site.removed || [])
+        check(name, !!p.probes && !(probe in p.probes), `${url.hostname}: content script removed the "${probe}" element`);
       if (url.hostname === 'www.hola.com')
         check(name, p.probes && p.probes.ad && p.probes.ad.display === 'none', `${url.hostname}: content script hid the advert (display=${p.probes && p.probes.ad && p.probes.ad.display})`);
     } else {
       // Unsupported site, or the extension has no access: nothing may change.
       check(name, !!doc && !GOOGLEBOT.test(doc.userAgent || '') && !/google|drudge/.test(doc.referer || ''), `${url.hostname}: request headers untouched`);
-      check(name, cw.contentScript !== true, `${url.hostname}: no content script`);
+      check(name, cw.contentScript !== true && !(p.world && p.world.contentScript), `${url.hostname}: no content script`);
       if (!supported)
         check(name, Object.values(fetched).every(Boolean), `${url.hostname}: no script blocked`);
     }

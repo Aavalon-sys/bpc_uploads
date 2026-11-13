@@ -10,10 +10,10 @@
 # The test pages are served by a local proxy (safari/engine/server.mjs) that
 # only the test's own web views use, so the real sites are never contacted.
 #
-# Three of the test hosts are on the system's HSTS preload list, where a
+# Some of the test hosts are on the system's HSTS preload list, where a
 # self-signed certificate cannot be accepted. With BPC_ENGINE_TRUST_CERT=1 (set
 # in CI) the test certificate is added to the System keychain for the duration
-# of the run, which needs sudo; without it those three hosts are left out and
+# of the run, which needs sudo; without it those hosts are left out and
 # nothing on the machine is changed. Used by .github/workflows/safari-engine.yml.
 set -euo pipefail
 
@@ -21,7 +21,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:-$ROOT/build/safari/engine}"
 EXT="$ROOT/build/safari/extension"
 HOSTS=(www.washingtonpost.com www.hola.com www.bpc-control.test)
-HSTS_HOSTS=(www.nytimes.com www.ft.com www.wsj.com)
+HSTS_HOSTS=(www.nytimes.com www.ft.com www.wsj.com hbr.org)
 CERT_NAME=bpc-engine-test
 HTTPS_PORT=18443
 PROXY_PORT=18080
