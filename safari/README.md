@@ -2,7 +2,7 @@
 
 这个目录把仓库根目录里的 Chrome 版发布包（`bypass-paywalls-chrome-clean-master.zip`）构建成 Safari Web Extension，原始发布文件不做任何改动。
 
-> **当前状态**：扩展已在 **WebKit 真实的扩展引擎**里跑通（CI 的 macOS 机器，系统自带的 WebKit 和新版 Safari 自带的 WebKit 各跑一遍）：伪装 Googlebot 的请求头、屏蔽付费墙脚本、注入内容脚本都按预期生效，详见文末「测试」。Safari 应用本身（界面、权限弹窗、安装流程）无法在 CI 里自动测试，所以装好后仍建议按「验证清单」看一遍。
+> **当前状态**：扩展已在 **真正的 Safari 应用**（CI 的 macOS 机器上的 Safari 27）和 **WebKit 的扩展引擎**里端到端跑通：伪装 Googlebot 的请求头、屏蔽付费墙脚本、注入内容脚本都按预期生效，后台页空闲被卸载后再打开文章也照常生效，详见文末「测试」。没有自动测试到的只有两处：打包成 App 之后的安装流程，以及 iPhone / iPad 上的 Safari（引擎相同，但没有可用的自动化手段）。所以装好后仍建议按「验证清单」看一遍。
 >
 > 2026-11 之前打包的版本在 Safari 里**完全不起作用**，原因见「早期版本为什么不起作用」。请更新到最新的构建。
 
@@ -106,6 +106,10 @@ safari/xcode/make-ipa.sh build/safari/dd build/safari/Bypass-Paywalls-Clean-unsi
 
 Safari 默认不允许扩展访问任何网站。没有授权的网站上，Safari 不会把网页地址告诉扩展，也不允许它注入脚本，所以扩展什么都做不了。修改请求头（Googlebot UA、Referer 等）和清除 Cookie 也同样需要授权。
 
+**第一次启用时的对话框**：扩展刚启用，Safari 就会弹出「扩展“Bypass Paywalls Clean”想要访问 gitflic.ru」（扩展启动时会到 gitflic.ru 检查更新，所以最先问到的是这个域名）。这是一次性授权全部网站的最快办法：**先勾选对话框里的复选框（英文界面是 Remember for other websites），再点「始终允许」（Always Allow）**。CI 里的 Safari 测试就是这样操作的，之后所有受支持的网站立即可用。不勾选复选框的话，只有 gitflic.ru 这一个网站被授权，新闻网站仍然不能用。
+
+如果当时选了别的，或者没有看到这个对话框，可以随时在设置里改：
+
 - **macOS**：Safari 设置 → 扩展 → Bypass Paywalls Clean → 「编辑网站…」→ 把「访问其他网站时」设为「允许」。也可以在新闻网站上点工具栏的扩展图标，选「在每个网站上始终允许」
 - **iPhone / iPad**：设置 → App → Safari → 扩展 → Bypass Paywalls Clean → 把「其他网站」设为「允许」
 
@@ -193,16 +197,31 @@ node --test --test-concurrency=1 safari/test/*.test.mjs
 safari/engine/run.sh
 ```
 
-GitHub Actions 的「Safari engine test」工作流在每次改动后自动运行它。这个测试用 WebKit 公开的 `WKWebExtension` 接口（Safari 的扩展功能就建在它上面）加载构建好的扩展，然后打开几个受支持网站的本地替身页面，检查真正发生了什么：
+GitHub Actions 的「Safari engine test」工作流在每次改动后自动运行它（以及下一节的 Safari 应用测试）。这个测试用 WebKit 公开的 `WKWebExtension` 接口（Safari 的扩展功能就建在它上面）加载构建好的扩展，然后打开几个受支持网站的本地替身页面，检查真正发生了什么：
 
 - 服务器实际收到的请求头（Googlebot 的 User-Agent、Google 的 Referer、被清空的 Cookie）；
 - 应该被屏蔽的脚本确实没有被请求，对照脚本照常加载；
 - 内容脚本确实注入并修改了页面（包括注入到网页自己的 JavaScript 环境的那一类）；
 - 扩展自己以为装上的规则数和 WebKit 里实际存在的规则数一致；
 - 没有网站权限时、在无痕窗口里，页面完全不受影响；不受支持的网站完全不受影响；
-- 扩展在「Safari 运行中启用」和「随 Safari 启动加载」两种情况下结果相同。
+- 扩展在「Safari 运行中启用」和「随 Safari 启动加载」两种情况下结果相同；
+- 后台页空闲 30 秒被 WebKit 卸载之后，下一次打开文章能把它唤醒，规则和内容脚本照常生效。
 
 测试页面由本机的代理提供（`safari/engine/server.mjs`），不会访问真实的网站。机器上的 Safari 比系统新时（Safari 自带一份更新的 WebKit），主要场景会用那份 WebKit 再跑一遍。
+
+### 在真正的 Safari 应用里测试（只适合 CI 机器）
+
+```bash
+safari/engine/safari-app.sh
+```
+
+引擎测试里，标签页、窗口和权限是测试程序自己模拟的。这个测试则让 Safari 应用本身通过 WebDriver（`safaridriver`，需要 Safari 18.4 以上）加载构建好的扩展，标签页、事件、权限对话框全部是 Safari 自己的：
+
+- Safari 弹出「想要访问 gitflic.ru」的对话框时，脚本像用户一样勾选复选框并点「始终允许」；
+- 然后依次打开同一批替身页面，检查服务器收到的请求头、被屏蔽的脚本、内容脚本对页面的修改；
+- 空闲 40 秒（让 Safari 卸载后台页）后再打开两个页面，检查结果相同。
+
+WebDriver 只能看到网页，看不到扩展内部，所以这里检查的都是网页和服务器能看到的结果。脚本会临时修改机器的设置（信任测试证书、设置代理自动配置、退出并重启 Safari、通过辅助功能接口点击对话框），结束后恢复，**不要在自己日常使用的 Mac 上运行**。
 
 ## 同步上游新版本
 
@@ -229,4 +248,4 @@ git merge upstream/main
 - `src/safari-diagnostics.html`、`src/safari-diagnostics.js`、`src/safari-popup.js`：诊断页和弹窗里的入口链接
 - `xcode/convert.sh`、`xcode/set-version.mjs`、`xcode/build-app.sh`、`xcode/make-ipa.sh`：生成 Xcode 工程、写入版本号、构建应用、打包未签名 ipa（CI 也调用这些脚本）
 - `test/`：模拟环境里的测试（`harness.mjs` 模拟浏览器 API，`webkit-rules.mjs` 是 Safari 规则模型，`sampler.mjs` 做正则等价性采样）
-- `engine/`：真实 WebKit 引擎里的测试（`host.m` 是加载扩展的宿主程序，`server.mjs` 是本地替身网站，`run.sh` 运行全部场景，`report.mjs` 汇总并检查结果）
+- `engine/`：真实 WebKit 引擎和 Safari 应用里的测试（`host.m` 是加载扩展的宿主程序，`server.mjs` 是本地替身网站，`run.sh` 运行引擎测试的全部场景，`safari-app.sh` 和 `safari-app.mjs` 驱动 Safari 应用，`report.mjs` 汇总并检查结果）
