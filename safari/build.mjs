@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..');
@@ -43,6 +44,28 @@ function parseArgs(argv) {
 }
 
 const sha256 = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+
+// What identifies this build: the commit it was built from (BPC_BUILD_COMMIT,
+// or the checked out commit) and a number that grows with every build
+// (BPC_BUILD_NUMBER, or the UTC time as YYYYMMDD.H.M, three integers as Apple
+// requires of a build number). The Safari diagnostics page shows both, and
+// the Xcode project uses the number as the app's build number, so that a
+// newer copy of the app always counts as newer (safari/xcode/set-version.mjs).
+function buildIdentity(now = new Date()) {
+  let commit = process.env.BPC_BUILD_COMMIT || null;
+  if (!commit) {
+    try {
+      const git = (...args) => execFileSync('git', ['-C', repo, ...args], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+      commit = git('rev-parse', 'HEAD') + (git('status', '--porcelain', '--', 'safari', '*.zip') ? '+changes' : '');
+    } catch (e) {
+      commit = null; // not a git checkout
+    }
+  }
+  const stamp = now.toISOString().replace(/\D/g, ''); // YYYYMMDDHHMMSSmmm
+  const number = /^\d+(\.\d+){0,2}$/.test(process.env.BPC_BUILD_NUMBER || '') ? process.env.BPC_BUILD_NUMBER
+    : `${stamp.slice(0, 8)}.${Number(stamp.slice(8, 10))}.${Number(stamp.slice(10, 12))}`;
+  return { commit, number, builtAt: now.toISOString() };
+}
 
 function unzipTo(zip, dir) {
   execFileSync('unzip', ['-q', '-o', zip, '-d', dir], { stdio: ['ignore', 'ignore', 'inherit'] });
@@ -102,7 +125,116 @@ const BACKGROUND_PATCHES = [
     replace: 'bpcSafari.offscreenParse(message.data).then(function (data) { sendArticleSrc(data.tab_id, {data: data}); })',
     count: 1,
   },
+  {
+    why: 'Safari repeats the install event on every re-enable and omits it at browser start-up; set the defaults once',
+    find: /(details\.reason == "install"\) \{\s*)setDefaultOptions\(\);/,
+    replace: '$1bpcSafari.firstRun(setDefaultOptions);',
+    count: 1,
+  },
+  {
+    why: 'open the options page once during the first start, not once per caller',
+    find: 'ext_api.runtime.openOptionsPage()',
+    replace: 'bpcSafari.openOptionsPage()',
+    count: { min: 1 },
+  },
 ];
+
+// For a few sites the extension injects its content scripts into the page's
+// own JavaScript world (world: "MAIN"). Chrome has a `chrome` object there;
+// Safari has neither `chrome` nor `browser` in a page, so the first statement
+// of those scripts threw and nothing ran. In the page world they now get an
+// empty object, which is what they are prepared for (no runtime, no storage),
+// and take the Chromium code path like the rest of the Safari build.
+const PAGE_WORLD_PATCHES = [
+  {
+    file: 'contentScript.js',
+    why: 'content script: no chrome or browser object in the page world of Safari',
+    find: 'var ext_api = chrome || browser;',
+    replace: "var ext_api = (typeof chrome === 'object' && chrome) || (typeof browser === 'object' && browser) || {};",
+    count: 1,
+  },
+  {
+    file: 'contentScript.js',
+    why: 'content script: Chromium code path in the page world too (the user agent of Safari does not say "chrome")',
+    find: "var ext_chromium = window.navigator.userAgent.toLowerCase().includes('chrome');",
+    replace: 'var ext_chromium = true;',
+    count: 1,
+  },
+  {
+    file: 'contentScript_once_var.js',
+    why: 'page-world script: no chrome or browser object in the page world of Safari',
+    find: "var ext_api = (typeof browser === 'object') ? browser : chrome;",
+    replace: "var ext_api = (typeof browser === 'object' && browser) || (typeof chrome === 'object' && chrome) || {};",
+    count: 1,
+  },
+];
+
+// Appended to background.js: puts right a site list stored by an earlier
+// Safari build, then does the first-time setup when no install event arrived
+// (the extension was first loaded while Safari was starting).
+const BACKGROUND_APPENDIX = `
+// Safari build: see bpcSafari.repairSiteNames and bpcSafari.firstRun in safari-compat.js.
+setTimeout(function () {
+  bpcSafari.repairSiteNames(defaultSites).then(function () {
+    bpcSafari.firstRun(setDefaultOptions);
+  });
+}, 1500);
+`;
+
+// Released Safari versions read the scripts of the background page as Latin-1:
+// the page WebKit generates for "background.scripts" declares no character
+// set there. The site names with accented letters in sites.js arrived garbled
+// ("TÃ©lÃ©rama.fr"); the options page, which reads the same file as UTF-8,
+// then no longer recognised those sites and saved the list without them.
+// A script without non-ASCII characters reads the same in every encoding, so
+// the scripts of the Safari build spell such characters as \uXXXX escapes.
+// In this code base they only occur in string and regular expression literals
+// (and comments), where the escape means the same; the build checks that
+// every rewritten script still parses.
+export function asciiJs(source) {
+  return source.replace(/^\ufeff/, '').replace(/(\\*)([^\x00-\x7f])/gu, (match, slashes, ch) => {
+    let escaped = '';
+    for (let i = 0; i < ch.length; i++) escaped += '\\u' + ch.charCodeAt(i).toString(16).padStart(4, '0');
+    // An odd number of backslashes escapes the character itself: "\é" is "é".
+    return (slashes.length % 2 ? slashes.slice(1) : slashes) + escaped;
+  });
+}
+
+function parses(code) {
+  try {
+    new vm.Script(code);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Rewrites every script in dir that has non-ASCII characters (see asciiJs).
+// The background scripts must come out ASCII-only; any other script that
+// cannot be checked or rewritten safely is left as it is (Safari reads the
+// scripts it injects into pages as UTF-8) and reported.
+function asciiScripts(dir, required) {
+  const done = [];
+  const kept = [];
+  for (const file of walk(dir).filter((f) => f.endsWith('.js'))) {
+    const rel = path.relative(dir, file).split(path.sep).join('/');
+    const text = fs.readFileSync(file, 'utf8');
+    if (!/[^\x00-\x7f]/.test(text)) continue;
+    const ascii = asciiJs(text);
+    const isBackground = required.includes(rel);
+    const checkable = parses(text); // otherwise nothing can be said about the rewritten script
+    const sound = parses(ascii);
+    if (isBackground && checkable && !sound)
+      throw new Error(`${rel} has non-ASCII characters outside of string literals, which Safari's background page would misread; update safari/build.mjs`);
+    if (!isBackground && !(checkable && sound)) {
+      kept.push(rel);
+      continue;
+    }
+    fs.writeFileSync(file, ascii);
+    done.push(rel);
+  }
+  return { done, kept };
+}
 
 function transformManifest(manifest) {
   const m = structuredClone(manifest);
@@ -120,6 +252,14 @@ function transformManifest(manifest) {
   delete m.minimum_chrome_version;
   delete m.incognito; // "split" is not supported; Safari always uses spanning mode
   m.permissions = (m.permissions || []).filter((p) => p !== 'offscreen');
+  // Chrome's declarativeNetRequestWithHostAccess limits every rule to sites the
+  // user granted; plain declarativeNetRequest lets block rules work without it
+  // (header rules and content scripts still need site access in Safari).
+  if (!m.permissions.includes('declarativeNetRequest')) m.permissions.push('declarativeNetRequest');
+  // Lets the compat layer see a navigation that gets no answer: a site that
+  // refuses the Googlebot user agent Safari cannot back up with Googlebot's
+  // address (see "Finding the sites that refuse a crawler" in safari-compat.js).
+  if (!m.permissions.includes('webNavigation')) m.permissions.push('webNavigation');
   // Safari always opens the options page in a tab and flags this key as unsupported.
   if (m.options_ui) delete m.options_ui.open_in_tab;
   m.action = { ...(m.action || {}), default_icon: { 128: 'bypass.png' } };
@@ -161,7 +301,33 @@ export function build(options = {}) {
       bg = res.text;
       applied.push({ patch: p.why, matches: res.matches });
     }
+    if (!/\bfunction setDefaultOptions\(\)/.test(bg))
+      throw new Error('background.js: setDefaultOptions() not found; upstream code changed, update safari/build.mjs');
+    bg += BACKGROUND_APPENDIX;
     fs.writeFileSync(bgFile, bg);
+
+    for (const p of PAGE_WORLD_PATCHES) {
+      const file = path.join(args.out, p.file);
+      const res = patch(fs.readFileSync(file, 'utf8'), p.file, p);
+      fs.writeFileSync(file, res.text);
+      applied.push({ patch: p.why, matches: res.matches });
+    }
+
+    // Popup: link to the Safari diagnostics page.
+    const popupFile = path.join(args.out, 'options', 'popup.html');
+    const popup = patch(fs.readFileSync(popupFile, 'utf8'), 'options/popup.html', {
+      find: '</body>',
+      replace: '<div><a href="#" id="bpc_safari_diag">Safari 诊断 / diagnostics</a></div>\n<script src="/safari-popup.js"></script>\n</body>',
+      count: 1,
+    });
+    fs.writeFileSync(popupFile, popup.text);
+    applied.push({ patch: 'popup links to the Safari diagnostics page', matches: popup.matches });
+
+    // lib/empty.js is injected before contentScript.js on most sites; give it
+    // content so that no browser treats it as a missing script.
+    const emptyLib = path.join(args.out, 'lib', 'empty.js');
+    if (fs.existsSync(emptyLib) && !fs.readFileSync(emptyLib, 'utf8').trim())
+      fs.writeFileSync(emptyLib, '/* intentionally empty (Safari build) */\n');
 
     // No other script may rely on APIs Safari lacks.
     for (const file of walk(args.out).filter((f) => f.endsWith('.js'))) {
@@ -184,17 +350,22 @@ export function build(options = {}) {
       }
     }
 
-    fs.copyFileSync(path.join(here, 'src', 'safari-compat.js'), path.join(args.out, 'safari-compat.js'));
+    for (const file of ['safari-compat.js', 'safari-popup.js', 'safari-diagnostics.html', 'safari-diagnostics.js'])
+      fs.copyFileSync(path.join(here, 'src', file), path.join(args.out, file));
     const safariManifest = transformManifest(manifest);
     fs.writeFileSync(path.join(args.out, 'manifest.json'), JSON.stringify(safariManifest, null, 2) + '\n');
+    const ascii = asciiScripts(args.out, safariManifest.background.scripts);
 
     const info = {
       name: manifest.name,
       version: manifest.version,
+      build: buildIdentity(),
       source: path.basename(args.src),
       sourceSha256: fs.statSync(args.src).isFile() ? sha256(args.src) : null,
       domPurify: purify,
       patches: applied,
+      asciiScripts: ascii.done,
+      nonAsciiScripts: ascii.kept,
     };
     fs.writeFileSync(path.join(args.out, 'safari-build.json'), JSON.stringify(info, null, 2) + '\n');
 
@@ -219,8 +390,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   try {
     const res = build(parseArgs(process.argv));
     console.log(`Safari extension ${res.info.version} written to ${path.relative(process.cwd(), res.out) || '.'}`);
+    console.log(`  build ${res.info.build.number}, commit ${res.info.build.commit || 'unknown'}`);
     for (const p of res.info.patches) console.log(`  patched (${p.matches}x): ${p.patch}`);
     console.log(`  DOMPurify: ${res.info.domPurify}`);
+    console.log(`  rewritten without non-ASCII characters: ${res.info.asciiScripts.join(', ') || 'none'}`);
+    if (res.info.nonAsciiScripts.length) console.log(`  left with non-ASCII characters: ${res.info.nonAsciiScripts.join(', ')}`);
     if (res.zip) console.log(`  zip: ${path.relative(process.cwd(), res.zip)}`);
   } catch (e) {
     console.error(`build failed: ${e.message}`);

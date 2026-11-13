@@ -1,0 +1,83 @@
+name: Safari engine test
+
+# Runs the Safari build of the extension on a macOS runner and checks what it
+# actually does (request headers, blocked scripts, content scripts):
+#  - in WebKit's real web-extension engine, the WKWebExtension API that Safari
+#    is built on, where the test can also look inside the extension;
+#  - in the Safari app itself, driven by safaridriver.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'safari/**'
+      - 'bypass-paywalls-chrome-clean-master.zip'
+      - 'bypass-paywalls-firefox-clean-master.zip'
+      - '.github/workflows/safari-engine.yml'
+  pull_request:
+    paths:
+      - 'safari/**'
+      - 'bypass-paywalls-chrome-clean-master.zip'
+      - 'bypass-paywalls-firefox-clean-master.zip'
+      - '.github/workflows/safari-engine.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: safari-engine-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    name: WebKit engine and Safari (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15]
+    steps:
+      - uses: actions/checkout@v4
+      - name: System
+        run: |
+          sw_vers
+          xcodebuild -version
+          defaults read /Applications/Safari.app/Contents/Info CFBundleShortVersionString || true
+          node --version
+          safaridriver --version || true
+          for dir in /System/Cryptexes/App/System/Library/StagedFrameworks/Safari /System/Volumes/Preboot/Cryptexes/App/System/Library/StagedFrameworks/Safari /Library/Apple/System/Library/StagedFrameworks/Safari; do
+            echo "staged frameworks in $dir:"
+            ls "$dir" 2>/dev/null | head -20 || true
+            defaults read "$dir/WebKit.framework/Resources/Info" CFBundleVersion 2>/dev/null || true
+          done
+      - name: Run the extension in WebKit
+        env:
+          # Lets the three test hosts on the HSTS preload list load from the local server.
+          BPC_ENGINE_TRUST_CERT: '1'
+        run: safari/engine/run.sh build/safari/engine
+      - name: Host logs
+        if: always()
+        run: |
+          for f in build/safari/engine/*.host.log; do
+            echo "=== $f"
+            tail -n 60 "$f" || true
+          done
+      - name: Run the extension in the Safari app
+        if: always()
+        run: safari/engine/safari-app.sh build/safari/app-test
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: safari-engine-${{ matrix.os }}
+          path: |
+            build/safari/engine/*.json
+            build/safari/engine/*.jsonl
+            build/safari/engine/*.log
+            build/safari/app-test/*.json
+            build/safari/app-test/*.jsonl
+            build/safari/app-test/*.log
+            build/safari/app-test/*.png
+          if-no-files-found: warn

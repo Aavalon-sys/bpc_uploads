@@ -15,12 +15,34 @@
  *    bpcSafari.updateSessionRules() adapts each rule first:
  *      * initiatorDomains / excludedInitiatorDomains -> domains /
  *        excludedDomains on Safari < 18.4,
+ *      * removes empty excluded-domain lists: Chrome reads them as "no
+ *        exclusion", Safari cannot compile them and then discards every
+ *        rule (the general paywall-script rules have such a list whenever
+ *        no site is disabled, which is the default),
  *      * drops responseHeaders (not supported by Safari),
+ *      * removes request headers Safari refuses to modify (Safari 18 only
+ *        accepts a fixed list, without X-Forwarded-For) and keeps the rest
+ *        of the rule,
  *      * rewrites regexFilter patterns that WebKit cannot compile
  *        (alternation, {n,m}, \d \w \s, ...) into one or more equivalent
  *        patterns, each becoming its own rule,
  *    and, if Safari still rejects the batch, applies it in halves to isolate
  *    and skip the rules Safari refuses.
+ *    Safari also reports success when the rule list then fails to compile: it
+ *    silently restores the previous rules. Every update therefore carries a
+ *    marker rule and is verified afterwards; a rolled back update is applied
+ *    in halves to find the rule Safari cannot compile, which is remembered.
+ *  - Safari sends no install event to an extension that is first loaded while
+ *    Safari starts, so the default sites were never enabled there:
+ *    bpcSafari.firstRun() does the first-time setup exactly once, with or
+ *    without that event.
+ *  - Earlier Safari builds stored site names with accented letters garbled,
+ *    after which the options page disabled those sites:
+ *    bpcSafari.repairSiteNames() puts such a stored list right.
+ *  - Without X-Forwarded-For, a Googlebot rule claims to be Googlebot from an
+ *    address that is not Google's. Sites that answer that with nothing or with
+ *    a denial (washingtonpost.com) get the rule without its User-Agent; such
+ *    sites are found as they are visited.
  */
 (function (root) {
   'use strict';
@@ -476,6 +498,12 @@
     var r = clone(rule);
     var c = r.condition || (r.condition = {});
     var a = r.action || {};
+    // An empty list of excluded domains excludes nothing. Safari turns it into
+    // an empty condition list, which its content blocker compiler rejects for
+    // the whole rule set.
+    ['excludedInitiatorDomains', 'excludedDomains', 'excludedRequestDomains'].forEach(function (key) {
+      if (Array.isArray(c[key]) && !c[key].length) delete c[key];
+    });
     if (legacyDomainKeys) {
       if (c.initiatorDomains) {
         c.domains = c.initiatorDomains;
@@ -491,6 +519,8 @@
       if (!a.requestHeaders || !a.requestHeaders.length)
         return Promise.resolve({ rules: [], dropped: 'responseHeaders not supported by Safari' });
     }
+    if (a.type === 'modifyHeaders' && a.requestHeaders && withoutRefusedHeaders(r) === 0)
+      return Promise.resolve({ rules: [], dropped: 'only modifies request headers Safari refuses' });
     if (typeof c.regexFilter !== 'string') return Promise.resolve({ rules: [r], dropped: null });
 
     var caseSensitive = !!c.isUrlFilterCaseSensitive;
@@ -521,10 +551,107 @@
   var report = {
     safariVersion: version,
     legacyDomainKeys: legacyDomainKeys,
+    startedAt: new Date().toISOString(),
     calls: 0,
     lastCall: null,
     lastAddCall: null, // last call that added rules
+    errors: [], // uncaught errors of the background page (see recordError)
+    crawler: [], // what happened to the crawler user agent of which site (see crawlerNote)
   };
+
+  // Uncaught errors and rejections in the background page (this script runs
+  // first, so errors in sites.js / background.js are caught too).
+  function recordError(message) {
+    report.errors.push({ at: new Date().toISOString(), message: String(message).slice(0, 600) });
+    if (report.errors.length > 20) report.errors.shift();
+  }
+  if (typeof root.addEventListener === 'function') {
+    root.addEventListener('error', function (e) {
+      recordError((e && (e.message || e.error)) + (e && e.filename ? ' @ ' + e.filename.split('/').pop() + ':' + e.lineno : ''));
+    });
+    root.addEventListener('unhandledrejection', function (e) {
+      var r = e && e.reason;
+      recordError('unhandled rejection: ' + (r && (r.message || r) || r));
+    });
+  }
+
+  function callSummary(call) {
+    if (!call) return null;
+    var dropped = {};
+    call.droppedRules.forEach(function (d) {
+      dropped[d.reason] = (dropped[d.reason] || 0) + 1;
+    });
+    return {
+      at: call.at,
+      rulesIn: call.rulesIn,
+      rulesOut: call.rulesOut,
+      expandedRules: call.expandedRules,
+      dropped: dropped,
+      strippedHeaders: call.strippedHeaders,
+      refusedHeaders: Object.keys(refusedHeaders),
+      rollbacks: call.rollbacks,
+      batchRejected: call.batchRejected,
+    };
+  }
+
+  // Kept in storage so that the diagnostics page can show it even when the
+  // non-persistent background page has been unloaded since.
+  function persistReport() {
+    try {
+      if (api && api.storage && api.storage.local) {
+        var p = api.storage.local.set({
+          bpc_safari_report: {
+            safariVersion: version,
+            startedAt: report.startedAt,
+            lastAddCall: callSummary(report.lastAddCall),
+            errors: report.errors.slice(-5),
+          },
+        });
+        if (p && typeof p.catch === 'function') p.catch(function () {});
+      }
+    } catch (e) {
+      // diagnostics only
+    }
+  }
+
+  // State of the running background page, for safari-diagnostics.html.
+  // enabledSites, self_hosted, ext_chromium, isSiteEnabled and matchUrlDomain
+  // are globals of background.js.
+  function diagnostics(url) {
+    var info = {
+      safariVersion: version,
+      legacyDomainKeys: legacyDomainKeys,
+      startedAt: report.startedAt,
+      lastAddCall: callSummary(report.lastAddCall),
+      errors: report.errors.slice(),
+    };
+    try {
+      info.backgroundLoaded = typeof isSiteEnabled === 'function';
+      info.enabledSites = typeof enabledSites !== 'undefined' ? enabledSites.length : null;
+      info.selfHosted = typeof self_hosted !== 'undefined' ? self_hosted : null;
+      info.chromiumCodePath = typeof ext_chromium !== 'undefined' ? ext_chromium : null;
+      if (url && typeof isSiteEnabled === 'function') {
+        info.siteEnabled = !!isSiteEnabled({ url: url });
+        info.siteDomain = (typeof matchUrlDomain === 'function' && typeof enabledSites !== 'undefined' && matchUrlDomain(enabledSites, url)) || '';
+      }
+    } catch (e) {
+      info.error = String(e && e.message || e);
+    }
+    // Sites that get no crawler user agent because Safari cannot send the crawler's address with it.
+    info.crawlerRefusedBy = Object.keys(crawlerRefusedBy).filter(crawlerRefused);
+    info.crawlerNotes = report.crawler.slice(-10);
+    var host = hostOf(url);
+    info.siteRefusesCrawler = !!host && !!refusedHeaders['x-forwarded-for'] && info.crawlerRefusedBy.some(function (domain) { return onSite(host, domain); });
+    return info;
+  }
+
+  if (api && api.runtime && api.runtime.onMessage) {
+    api.runtime.onMessage.addListener(function (message, sender, sendResponse) {
+      if (!message || message.request !== 'bpcSafariDiag') return undefined;
+      sendResponse(diagnostics(message.url));
+      return undefined;
+    });
+  }
 
   function summarize(res) {
     var dropped = {};
@@ -534,55 +661,304 @@
     return dropped;
   }
 
-  // Safari reports invalid rules as "Rule with id N is invalid. ..."; when the
-  // message names a rule of the batch, only that rule is dropped and the rest
-  // is retried (each failed attempt is cheap, each successful one recompiles
-  // the content blocker). Otherwise the batch is bisected.
-  var MAX_ID_RETRIES = 500;
-  function applyBatch(rules, removeRuleIds, result) {
-    var pending = rules.slice();
-    var retries = 0;
+  // Request headers Safari refused to modify in this session (lower case).
+  // Safari 18 only accepts a fixed list of header names and rejects the whole
+  // update for any other ("The header `X-Forwarded-For` is not recognized.").
+  var refusedHeaders = {};
 
-    function rejectedRuleIndex(err) {
-      var m = /\bid\s+(\d+)\b/i.exec((err && err.message) || '');
-      if (!m) return -1;
-      var id = parseInt(m[1], 10);
-      for (var k = 0; k < pending.length; k++) if (pending[k].id === id) return k;
-      return -1;
+  // --- A crawler's user agent without the crawler's address -----------------
+  //
+  // The Googlebot rules of the extension set three request headers: the
+  // User-Agent of Googlebot, a Google Referer and X-Forwarded-For with an
+  // address of Google's crawler. Safari refuses X-Forwarded-For, which leaves
+  // a request that claims to be Googlebot but does not come from Google. Some
+  // sites answer such a request with nothing at all (the page never loads, as
+  // on washingtonpost.com) or with a denial page. For those sites the rule is
+  // better off without the User-Agent: the page opens, and the other measures
+  // for the site (blocked scripts, Referer, content script) still apply.
+  //
+  // Which sites do this is found out as it happens (see "Finding the sites
+  // that refuse a crawler" below); the ones already known are listed here.
+  var CRAWLER_UA = /Googlebot/i;
+  var CRAWLER_REFUSED_BY = ['washingtonpost.com'];
+  // domain -> {reason, since, until, times}: no crawler User-Agent for this
+  // site until `until` (0: for good).
+  var crawlerRefusedBy = {};
+  CRAWLER_REFUSED_BY.forEach(function (domain) {
+    crawlerRefusedBy[domain] = { reason: 'known', since: '', until: 0, times: 0 };
+  });
+
+  function isCrawlerHeader(h) {
+    return !!h && String(h.header).toLowerCase() === 'user-agent' && CRAWLER_UA.test(String(h.value || ''));
+  }
+
+  // The site a header rule is for: "||example.com", or its first request domain.
+  function ruleDomain(rule) {
+    var c = (rule && rule.condition) || {};
+    var m = /^\|\|([a-z0-9.-]+)/i.exec(String(c.urlFilter || ''));
+    if (m) return m[1].toLowerCase();
+    return Array.isArray(c.requestDomains) && c.requestDomains.length ? String(c.requestDomains[0]).toLowerCase() : '';
+  }
+
+  function crawlerRefused(domain) {
+    var entry = Object.prototype.hasOwnProperty.call(crawlerRefusedBy, domain) ? crawlerRefusedBy[domain] : null;
+    return !!entry && (!entry.until || entry.until > Date.now());
+  }
+
+  // Removes the refused headers from a modifyHeaders rule, in place, and with
+  // X-Forwarded-For the User-Agent of a crawler for the sites that refuse it.
+  // Returns the number of request headers left.
+  function withoutRefusedHeaders(rule) {
+    var headers = rule.action.requestHeaders || [];
+    var kept = headers.filter(function (h) {
+      return !refusedHeaders[String(h && h.header).toLowerCase()];
+    });
+    if (refusedHeaders['x-forwarded-for'] && kept.some(isCrawlerHeader) && crawlerRefused(ruleDomain(rule)))
+      kept = kept.filter(function (h) { return !isCrawlerHeader(h); });
+    if (kept.length !== headers.length) rule.action.requestHeaders = kept;
+    return kept.length;
+  }
+
+  function refusedHeaderIn(err) {
+    var m = /header `([^`]+)` (?:is not recognized|cannot be modified)/i.exec((err && err.message) || '');
+    return m ? m[1].toLowerCase() : null;
+  }
+
+  // --- Verifying that an update really took effect ---------------------------
+  //
+  // After storing new rules Safari compiles all of them into one content
+  // blocker. When that fails (one pattern it cannot compile is enough) it puts
+  // the previous rules back and still reports success. Each update therefore
+  // carries a marker rule, which matches no real request, and is checked for
+  // afterwards.
+  var MARKER_ID = 9000000; // above upstream ids, below the variant ids
+  var markerCount = 0;
+
+  function hashOf(text) {
+    var h = 0x811c9dc5;
+    for (var i = 0; i < text.length; i++) {
+      h ^= text.charCodeAt(i);
+      h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
     }
+    return h.toString(36);
+  }
 
-    function retry(err) {
-      var idx = rejectedRuleIndex(err);
-      if (idx >= 0 && retries++ < MAX_ID_RETRIES) {
-        result.droppedRules.push({ id: pending[idx].id, reason: 'rejected by Safari: ' + err.message, rule: pending[idx] });
-        pending.splice(idx, 1);
-        if (!pending.length) return Promise.resolve();
-        return callDnr('updateSessionRules', { addRules: pending }).catch(retry);
-      }
-      return addInChunks(pending, result.droppedRules);
-    }
+  // `stable` markers depend on the rules only, so that an unchanged rule set
+  // produces an identical update and Safari can reuse its compiled list (the
+  // background page restarts often). Retries use a fresh marker each time.
+  function markerFor(rules, stable) {
+    var tag = hashOf(JSON.stringify(rules)) + (stable ? '' : '-' + (++markerCount) + '-' + Date.now().toString(36));
+    return {
+      id: MARKER_ID,
+      priority: 1,
+      action: { type: 'allow' },
+      condition: { urlFilter: '||bpc-safari-marker.invalid/' + tag, resourceTypes: ['main_frame'] },
+    };
+  }
 
-    return callDnr('updateSessionRules', { addRules: pending, removeRuleIds: removeRuleIds }).catch(function (err) {
-      result.batchRejected = err.message;
-      // Nothing was applied: do the removals on their own, then add again.
-      return callDnr('updateSessionRules', { removeRuleIds: removeRuleIds }).catch(function () {}).then(function () {
-        return retry(err);
+  function isMarker(rule) {
+    return !!rule && rule.id === MARKER_ID;
+  }
+
+  function wasCommitted(marker) {
+    if (typeof dnr.getSessionRules !== 'function') return Promise.resolve(true);
+    return callDnr('getSessionRules').then(function (rules) {
+      return (rules || []).some(function (r) {
+        return r.id === MARKER_ID && r.condition && r.condition.urlFilter === marker.condition.urlFilter;
       });
+    }, function () {
+      return true; // cannot tell: assume it worked
     });
   }
 
-  // Adds rules, splitting the batch when Safari rejects it so that a single
-  // bad rule cannot take the whole set down.
-  function addInChunks(rules, droppedRules) {
+  // Rules Safari could not compile, remembered across restarts of the
+  // background page (per Safari version) so that they are found only once.
+  var REFUSED_KEY = 'bpc_safari_refused_2';
+  var refusedRules = {};
+  var refusedLoaded = null;
+
+  function ruleKey(rule) {
+    var c = rule.condition || {};
+    var parts = Object.keys(c).sort().map(function (k) { return k + '=' + JSON.stringify(c[k]); });
+    return (rule.action && rule.action.type) + '|' + parts.join('|');
+  }
+
+  // Sites found to refuse a crawler's User-Agent, and sites cleared of it.
+  var CRAWLER_KEY = 'bpc_safari_crawler';
+  var DAY_MS = 24 * 3600 * 1000;
+  // domain -> time: the site failed with and without the User-Agent, so the
+  // User-Agent is not the reason; not examined again for a week.
+  var crawlerCleared = {};
+
+  function loadRefused() {
+    if (!refusedLoaded) {
+      refusedLoaded = Promise.resolve().then(function () {
+        return api.storage.local.get([REFUSED_KEY, CRAWLER_KEY]);
+      }).then(function (items) {
+        var crawler = (items && items[CRAWLER_KEY]) || {};
+        var now = Date.now();
+        Object.keys(crawler.refusedBy || {}).forEach(function (domain) {
+          var entry = crawler.refusedBy[domain];
+          // An entry past its time stays for a while: it says how often the site did this.
+          if (crawlerRefusedBy[domain] || !entry || (entry.until && entry.until < now - 90 * DAY_MS)) return;
+          crawlerRefusedBy[domain] = { reason: String(entry.reason || ''), since: String(entry.since || ''), until: Number(entry.until) || 0, times: Number(entry.times) || 0 };
+        });
+        Object.keys(crawler.cleared || {}).forEach(function (domain) {
+          if (now - crawler.cleared[domain] < 7 * DAY_MS) crawlerCleared[domain] = crawler.cleared[domain];
+        });
+        var saved = items && items[REFUSED_KEY];
+        if (!saved || saved.safari !== String(version)) return;
+        (saved.rules || []).forEach(function (key) { refusedRules[key] = true; });
+        (saved.headers || []).forEach(function (name) { refusedHeaders[name] = true; });
+      }).catch(function () {});
+    }
+    return refusedLoaded;
+  }
+
+  function saveCrawler() {
+    try {
+      var found = {};
+      Object.keys(crawlerRefusedBy).forEach(function (domain) {
+        var entry = crawlerRefusedBy[domain];
+        if (entry.reason !== 'known' && !entry.tentative) found[domain] = entry;
+      });
+      var record = {};
+      record[CRAWLER_KEY] = { refusedBy: found, cleared: crawlerCleared };
+      var p = api.storage.local.set(record);
+      if (p && typeof p.catch === 'function') p.catch(function () {});
+    } catch (e) {
+      // best effort
+    }
+  }
+
+  function saveRefused() {
+    try {
+      var record = {};
+      record[REFUSED_KEY] = { safari: String(version), rules: Object.keys(refusedRules).slice(-300), headers: Object.keys(refusedHeaders) };
+      var p = api.storage.local.set(record);
+      if (p && typeof p.catch === 'function') p.catch(function () {});
+    } catch (e) {
+      // best effort
+    }
+  }
+
+  // Adds rules, coping with the ways Safari refuses an update. Safari reports
+  // an invalid rule as "Rule with id N is invalid. <reason>" and rejects the
+  // whole call (a failed attempt is cheap, a successful one recompiles the
+  // content blocker):
+  //  - when the reason is a request header Safari refuses, that header is
+  //    removed from the rules and the rest of each rule is kept;
+  //  - otherwise, when the message names a rule of the list, that rule is
+  //    dropped;
+  //  - without a usable message the list is applied in halves until the
+  //    refused rules are isolated.
+  // An update Safari accepted but then rolled back is applied in halves too.
+  var MAX_NAMED_RETRIES = 500;
+  function addRulesTolerantly(rules, result) {
     if (!rules.length) return Promise.resolve();
-    return callDnr('updateSessionRules', { addRules: rules }).catch(function (err) {
-      if (rules.length === 1) {
-        droppedRules.push({ id: rules[0].id, reason: 'rejected by Safari: ' + err.message, rule: rules[0] });
-        return;
+    var marker = markerFor(rules, false);
+    return callDnr('updateSessionRules', { addRules: rules.concat([marker]), removeRuleIds: [MARKER_ID] }).then(function () {
+      return wasCommitted(marker).then(function (committed) {
+        if (committed) {
+          result.rulesOut += rules.length;
+          return undefined;
+        }
+        return afterRollback(rules, result);
+      });
+    }, function (err) {
+      return afterRejection(rules, result, err);
+    });
+  }
+
+  // Safari accepted `rules` but could not compile the resulting rule list and
+  // restored the previous state: find the rule(s) responsible.
+  function afterRollback(rules, result) {
+    result.rollbacks++;
+    if (rules.length === 1) {
+      refusedRules[ruleKey(rules[0])] = true;
+      result.droppedRules.push({ id: rules[0].id, reason: 'Safari cannot compile this rule', rule: rules[0] });
+      return Promise.resolve();
+    }
+    var mid = Math.ceil(rules.length / 2);
+    return addRulesTolerantly(rules.slice(0, mid), result).then(function () {
+      return addRulesTolerantly(rules.slice(mid), result);
+    });
+  }
+
+  // Decides what to change after Safari rejected `rules` with `err`, then
+  // tries again.
+  function afterRejection(rules, result, err) {
+    if (!result.batchRejected) result.batchRejected = err.message;
+
+    var header = refusedHeaderIn(err);
+    if (header) {
+      refusedHeaders[header] = true;
+      var changed = 0;
+      var kept = rules.filter(function (rule) {
+        if (!rule.action || rule.action.type !== 'modifyHeaders' || !rule.action.requestHeaders) return true;
+        var before = rule.action.requestHeaders.length;
+        var left = withoutRefusedHeaders(rule);
+        if (left === before) return true;
+        changed++;
+        if (left) return true;
+        result.droppedRules.push({ id: rule.id, reason: 'only modifies request headers Safari refuses', rule: rule });
+        return false;
+      });
+      if (changed) {
+        result.strippedHeaders[header] = (result.strippedHeaders[header] || 0) + changed;
+        return addRulesTolerantly(kept, result);
       }
-      var mid = Math.ceil(rules.length / 2);
-      return addInChunks(rules.slice(0, mid), droppedRules).then(function () {
-        return addInChunks(rules.slice(mid), droppedRules);
+    }
+
+    var named = /\bid\s+(\d+)\b/i.exec(err.message || '');
+    if (named && result.namedRetries < MAX_NAMED_RETRIES) {
+      var id = parseInt(named[1], 10);
+      for (var k = 0; k < rules.length; k++) {
+        if (rules[k].id === id) {
+          result.namedRetries++;
+          result.droppedRules.push({ id: id, reason: 'rejected by Safari: ' + err.message, rule: rules[k] });
+          return addRulesTolerantly(rules.slice(0, k).concat(rules.slice(k + 1)), result);
+        }
+      }
+    }
+
+    if (rules.length === 1) {
+      result.droppedRules.push({ id: rules[0].id, reason: 'rejected by Safari: ' + err.message, rule: rules[0] });
+      return undefined;
+    }
+    var mid = Math.ceil(rules.length / 2);
+    return addRulesTolerantly(rules.slice(0, mid), result).then(function () {
+      return addRulesTolerantly(rules.slice(mid), result);
+    });
+  }
+
+  function applyBatch(rules, removeRuleIds, result) {
+    if (!rules.length) {
+      // Nothing to add, so nothing to verify.
+      if (!removeRuleIds.length) return Promise.resolve();
+      return callDnr('updateSessionRules', { removeRuleIds: removeRuleIds });
+    }
+    var marker = markerFor(rules, true);
+    var removals = removeRuleIds.concat([MARKER_ID]);
+    // Whatever went wrong, nothing was applied: do the removals on their own,
+    // then add again.
+    function removeThen(next) {
+      return callDnr('updateSessionRules', { removeRuleIds: removals }).catch(function () {}).then(next);
+    }
+    return callDnr('updateSessionRules', { addRules: rules.concat([marker]), removeRuleIds: removals }).then(function () {
+      return wasCommitted(marker).then(function (committed) {
+        if (committed) {
+          result.rulesOut += rules.length;
+          return undefined;
+        }
+        return removeThen(function () {
+          return afterRollback(rules, result);
+        });
+      });
+    }, function (err) {
+      result.batchRejected = err.message;
+      return removeThen(function () {
+        return afterRejection(rules, result, err);
       });
     });
   }
@@ -602,12 +978,15 @@
       expandedRules: 0,
       partialRules: 0,
       droppedRules: [],
+      strippedHeaders: {}, // refused header name -> number of rules it was removed from
+      namedRetries: 0,
+      rollbacks: 0, // updates Safari accepted and then silently undid
       batchRejected: false,
     };
 
-    var existing = typeof dnr.getSessionRules === 'function'
-      ? callDnr('getSessionRules').catch(function () { return []; })
-      : Promise.resolve([]);
+    var existing = loadRefused().then(function () {
+      return typeof dnr.getSessionRules === 'function' ? callDnr('getSessionRules').catch(function () { return []; }) : [];
+    });
 
     return existing.then(function (current) {
       // Remove the extra variant rules belonging to every upstream id that is
@@ -622,17 +1001,25 @@
         if (res.dropped) result.droppedRules.push({ id: addRules[k].id, reason: res.dropped, rule: addRules[k] });
         if (res.expanded) result.expandedRules++;
         if (res.partial) result.partialRules++;
-        out = out.concat(res.rules);
+        res.rules.forEach(function (rule) {
+          if (refusedRules[ruleKey(rule)])
+            result.droppedRules.push({ id: rule.id, reason: 'Safari cannot compile this rule', rule: rule });
+          else
+            out.push(rule);
+        });
       });
-      result.rulesOut = out.length;
+      var knownBefore = Object.keys(refusedRules).length + Object.keys(refusedHeaders).length;
       return applyBatch(out, removeRuleIds, result).then(function () {
-        result.rulesOut = out.length - result.droppedRules.filter(function (d) { return /^rejected/.test(d.reason); }).length;
+        crawlerDomainsCache = null;
+        if (Object.keys(refusedRules).length + Object.keys(refusedHeaders).length !== knownBefore) saveRefused();
         report.calls++;
         report.lastCall = result;
-        if (addRules.length) report.lastAddCall = result;
         if (addRules.length) {
+          report.lastAddCall = result;
+          persistReport();
           console.info('BPC Safari: ' + result.rulesIn + ' rules requested, ' + result.rulesOut + ' applied (' +
             result.expandedRules + ' regex rules rewritten, ' + result.droppedRules.length + ' skipped)' +
+            (Object.keys(refusedHeaders).length ? ' request headers Safari refuses: ' + Object.keys(refusedHeaders).join(', ') + '.' : '') +
             (result.droppedRules.length ? ' ' + JSON.stringify(summarize(result)) : ''));
         }
         return result;
@@ -654,6 +1041,244 @@
       console.error('BPC Safari: updateSessionRules failed', err);
       if (typeof callback === 'function') callback();
     });
+  }
+
+  // --- Finding the sites that refuse a crawler --------------------------------
+  //
+  // Only while Safari refuses X-Forwarded-For (see "A crawler's user agent
+  // without the crawler's address" above). A main-frame navigation to a site
+  // with a Googlebot rule is watched:
+  //  - no answer within STALL_MS while the tab is still loading, or
+  //  - the load ends on a short page that reads like a denial,
+  // and the rule loses its User-Agent and the navigation is repeated once. If
+  // the repeated load works, the site is remembered: for a day the first
+  // time, for a month from the second time on (a network hiccup can look the
+  // same once). If it fails the same way, the User-Agent was not the reason:
+  // it comes back and the site is left alone for a week.
+  var STALL_MS = 12000;
+  var crawlerDomainsCache = null; // promise of the domains with a crawler rule installed
+  var crawlerRulesTaken = {};     // domain -> the rules as they were with the User-Agent
+  var crawlerFine = {};           // domain -> true: loaded with the User-Agent since this page started
+  var navigations = {};           // tabId -> the main-frame navigation under way
+  var repeats = {};               // tabId -> domain whose navigation is being repeated
+
+  function hostOf(url) {
+    var m = /^https?:\/\/([^\/?#:]+)/i.exec(String(url || ''));
+    return m ? m[1].toLowerCase() : '';
+  }
+
+  function onSite(host, domain) {
+    return host === domain || host.slice(-domain.length - 1) === '.' + domain;
+  }
+
+  function crawlerDomains() {
+    if (!crawlerDomainsCache) {
+      crawlerDomainsCache = callDnr('getSessionRules').then(function (rules) {
+        var domains = {};
+        (rules || []).forEach(function (rule) {
+          var headers = rule.action && rule.action.type === 'modifyHeaders' && rule.action.requestHeaders;
+          if (headers && headers.some(isCrawlerHeader) && ruleDomain(rule)) domains[ruleDomain(rule)] = true;
+        });
+        return Object.keys(domains);
+      }).catch(function () {
+        crawlerDomainsCache = null;
+        return [];
+      });
+    }
+    return crawlerDomainsCache;
+  }
+
+  // The site with a crawler rule that `url` belongs to, or ''.
+  function crawlerDomainFor(url, repeated) {
+    var host = hostOf(url);
+    if (!host || !dnr) return Promise.resolve('');
+    return loadRefused().then(function () {
+      if (!refusedHeaders['x-forwarded-for']) return '';
+      if (repeated && onSite(host, repeated)) return repeated;
+      return crawlerDomains().then(function (domains) {
+        for (var k = 0; k < domains.length; k++)
+          if (onSite(host, domains[k])) return domains[k];
+        return '';
+      });
+    }).catch(function () {
+      return '';
+    });
+  }
+
+  // Takes the crawler's User-Agent out of the installed rules for a site
+  // (send: false), or puts the rules back as they were (send: true).
+  function setCrawlerIdentity(domain, send) {
+    var run = queue.then(function () {
+      return callDnr('getSessionRules');
+    }).then(function (rules) {
+      var remove = [];
+      var add = [];
+      if (send) {
+        (crawlerRulesTaken[domain] || []).forEach(function (original) {
+          remove.push(original.id);
+          add.push(original);
+        });
+        delete crawlerRulesTaken[domain];
+      } else {
+        var originals = [];
+        (rules || []).forEach(function (rule) {
+          var headers = rule.action && rule.action.type === 'modifyHeaders' && rule.action.requestHeaders;
+          if (!headers || !headers.some(isCrawlerHeader) || ruleDomain(rule) !== domain) return;
+          originals.push(clone(rule));
+          remove.push(rule.id);
+          var changed = clone(rule);
+          changed.action.requestHeaders = headers.filter(function (h) { return !isCrawlerHeader(h); });
+          if (changed.action.requestHeaders.length) add.push(changed);
+        });
+        if (originals.length) crawlerRulesTaken[domain] = originals;
+      }
+      crawlerDomainsCache = null;
+      if (!remove.length) return false;
+      return callDnr('updateSessionRules', { removeRuleIds: remove, addRules: add }).then(function () { return true; });
+    });
+    queue = run.catch(function () {});
+    return run.catch(function (e) {
+      recordError('crawler identity for ' + domain + ': ' + (e && e.message || e));
+      return false;
+    });
+  }
+
+  function forgetNavigation(tabId) {
+    var nav = navigations[tabId];
+    if (nav) clearTimeout(nav.timer);
+    delete navigations[tabId];
+  }
+
+  // Runs in the page: enough of it to tell a denial from an article.
+  function pageSummary() {
+    var text = (document.body && document.body.innerText) || '';
+    return { title: String(document.title || ''), length: text.length, text: text.slice(0, 400) };
+  }
+
+  function looksDenied(page) {
+    if (!page || typeof page.length !== 'number' || page.length > 1500) return false;
+    return /access (is |was )?denied|forbidden|\b40[136]\b|\b429\b|request (was )?blocked|been blocked|unusual traffic|not a robot|captcha|verify (that )?you are (a )?human|just a moment|pardon our interruption|request unsuccessful|automated (access|requests)|bot detected/i
+      .test(page.title + ' ' + page.text);
+  }
+
+  function crawlerNote(domain, text) {
+    report.crawler.push({ at: new Date().toISOString(), domain: domain, note: text });
+    if (report.crawler.length > 30) report.crawler.shift();
+    console.info('BPC Safari: ' + domain + ': ' + text);
+  }
+
+  // The navigation got no answer, or a denial.
+  function crawlerFailed(tabId, nav, reason) {
+    forgetNavigation(tabId);
+    var domain = nav.domain;
+    var entry = crawlerRefusedBy[domain];
+    if (nav.repeated) {
+      // No better without the User-Agent: it was not the reason.
+      if (entry && entry.tentative) {
+        if (entry.times) {
+          delete entry.tentative;
+          entry.until = 1; // past its time; kept for the count
+        } else delete crawlerRefusedBy[domain];
+      }
+      crawlerCleared[domain] = Date.now();
+      saveCrawler();
+      crawlerNote(domain, 'also fails without the crawler user agent (' + reason + '); sending it again');
+      return setCrawlerIdentity(domain, true);
+    }
+    crawlerRefusedBy[domain] = { reason: reason, since: new Date().toISOString(), until: Date.now() + 5 * 60000, times: (entry && entry.times) || 0, tentative: true };
+    crawlerNote(domain, reason + ' with the crawler user agent; trying again without it');
+    return setCrawlerIdentity(domain, false).then(function () {
+      repeats[tabId] = domain;
+      return api.tabs.update(tabId, { url: nav.url });
+    }).catch(function (e) {
+      recordError('repeating the navigation to ' + domain + ': ' + (e && e.message || e));
+    });
+  }
+
+  // The navigation ended on a page that is not a denial.
+  function crawlerLoaded(nav) {
+    var domain = nav.domain;
+    var entry = crawlerRefusedBy[domain];
+    if (!nav.repeated) {
+      crawlerFine[domain] = true;
+      return;
+    }
+    if (!entry || !entry.tentative) return;
+    delete entry.tentative;
+    entry.times++;
+    entry.until = Date.now() + (entry.times >= 2 ? 30 : 1) * DAY_MS;
+    saveCrawler();
+    crawlerNote(domain, 'loads without the crawler user agent; not sending it for ' + (entry.times >= 2 ? '30 days' : 'a day'));
+  }
+
+  function inspectPage(tabId, nav) {
+    forgetNavigation(tabId);
+    return Promise.resolve().then(function () {
+      return api.scripting.executeScript({ target: { tabId: tabId }, func: pageSummary });
+    }).then(function (results) {
+      var page = results && results[0] && results[0].result;
+      if (looksDenied(page)) return crawlerFailed(tabId, nav, 'denied ("' + String(page.title).slice(0, 60) + '")');
+      return crawlerLoaded(nav);
+    }, function () {
+      // The page cannot be looked at; a repeated load that got this far counts as loaded.
+      if (nav.repeated) crawlerLoaded(nav);
+    });
+  }
+
+  function stalled(tabId, nav) {
+    if (navigations[tabId] !== nav || nav.committed) return undefined;
+    // A load that ended without an answer (an error, or the user stopped it) is left alone.
+    return Promise.resolve().then(function () {
+      return api.tabs.get(tabId);
+    }).then(function (tab) {
+      if (navigations[tabId] !== nav || nav.committed) return undefined;
+      if (!tab || tab.status !== 'loading') return forgetNavigation(tabId);
+      return crawlerFailed(tabId, nav, 'no answer within ' + Math.round(STALL_MS / 1000) + ' s');
+    }, function () {
+      forgetNavigation(tabId);
+    });
+  }
+
+  function onBeforeNavigate(details) {
+    if (!details || details.frameId !== 0) return;
+    var tabId = details.tabId;
+    forgetNavigation(tabId);
+    var repeated = repeats[tabId];
+    delete repeats[tabId];
+    var nav = navigations[tabId] = { url: details.url, domain: '', repeated: false, committed: false, completed: false, timer: null };
+    crawlerDomainFor(details.url, repeated).then(function (domain) {
+      if (navigations[tabId] !== nav) return;
+      nav.domain = domain;
+      nav.repeated = !!domain && domain === repeated;
+      if (!domain || (!nav.repeated && (crawlerFine[domain] || crawlerCleared[domain] || crawlerRefused(domain)))) {
+        forgetNavigation(tabId);
+        return;
+      }
+      if (nav.completed) inspectPage(tabId, nav);
+      else if (!nav.committed) nav.timer = setTimeout(function () { stalled(tabId, nav); }, STALL_MS);
+    });
+  }
+
+  function onCommitted(details) {
+    var nav = details && details.frameId === 0 ? navigations[details.tabId] : null;
+    if (!nav) return;
+    nav.committed = true;
+    clearTimeout(nav.timer);
+  }
+
+  function onCompleted(details) {
+    var nav = details && details.frameId === 0 ? navigations[details.tabId] : null;
+    if (!nav) return;
+    nav.committed = nav.completed = true;
+    clearTimeout(nav.timer);
+    if (nav.domain) inspectPage(details.tabId, nav);
+  }
+
+  if (api && api.webNavigation && api.webNavigation.onBeforeNavigate && api.webNavigation.onCommitted && api.webNavigation.onCompleted) {
+    api.webNavigation.onBeforeNavigate.addListener(onBeforeNavigate);
+    api.webNavigation.onCommitted.addListener(onCommitted);
+    api.webNavigation.onCompleted.addListener(onCompleted);
+    if (api.tabs && api.tabs.onRemoved) api.tabs.onRemoved.addListener(forgetNavigation);
   }
 
   function getSelf(callback) {
@@ -697,12 +1322,161 @@
     }
   });
 
+  // First-time setup. Chrome sends runtime.onInstalled with reason "install"
+  // exactly once. WebKit sends it whenever the extension is (re-)enabled while
+  // the browser runs, and not at all when the extension is first loaded during
+  // browser start-up, which left the list of enabled sites empty for good.
+  // setDefaults (setDefaultOptions of background.js) therefore runs once per
+  // profile: on the first call here, unless sites are already stored.
+  var FIRST_RUN_KEY = 'bpc_safari_first_run';
+  var firstRunPromise = null;
+  function firstRun(setDefaults) {
+    if (!firstRunPromise) {
+      firstRunPromise = Promise.resolve().then(function () {
+        return api.storage.local.get(['sites', FIRST_RUN_KEY]);
+      }).then(function (items) {
+        if (items[FIRST_RUN_KEY]) return false;
+        var flag = {};
+        flag[FIRST_RUN_KEY] = new Date().toISOString();
+        return Promise.resolve(api.storage.local.set(flag)).then(function () {
+          if (items.sites && Object.keys(items.sites).length) return false; // set up by an earlier build
+          setDefaults();
+          report.firstRun = flag[FIRST_RUN_KEY];
+          return true;
+        });
+      }).catch(function (e) {
+        recordError('first run failed: ' + (e && e.message || e));
+        return false;
+      });
+    }
+    return firstRunPromise;
+  }
+
+  // Site lists stored by earlier Safari builds. Released Safari versions read
+  // the scripts of the background page as Latin-1, so those builds saw the
+  // site names with accented letters garbled and stored them that way. The
+  // options page reads the same names as UTF-8: it did not recognise the
+  // garbled ones and, as it saves the list whenever it is opened, stored the
+  // list without those sites. The scripts are ASCII-only now (asciiJs in
+  // safari/build.mjs); this puts a stored list right, once per profile:
+  //  - a garbled name becomes the name sites.js has for the same domain,
+  //  - when every site the options page could not match is missing while
+  //    nearly all other default sites are enabled, those sites are enabled
+  //    again (a list the user cut down to a few sites is left alone),
+  //  - sites_default, the names known to the last version, gets the same fix.
+  var NAMES_KEY = 'bpc_safari_site_names';
+  var hasOwn = function (object, key) {
+    return !!object && Object.prototype.hasOwnProperty.call(object, key);
+  };
+  function hasNonAscii(text) {
+    return /[^\x00-\x7f]/.test(String(text));
+  }
+  // compareKey() of background.js and options.js: names match without their " (...)" part.
+  function plainName(name) {
+    return String(name).toLowerCase().replace(/\s\(.*\)/, '');
+  }
+  function repairSiteNames(defaults) {
+    return Promise.resolve().then(function () {
+      return api.storage.local.get([NAMES_KEY, 'sites', 'sites_default', 'sites_custom', 'sites_updated', 'sites_excluded']);
+    }).then(function (items) {
+      if (items[NAMES_KEY]) return null;
+      var result = { at: new Date().toISOString(), renamed: 0, restored: 0, known: 0 };
+      var changes = {};
+      var sites = items.sites && typeof items.sites === 'object' ? items.sites : {};
+      var excluded = Array.isArray(items.sites_excluded) ? items.sites_excluded : [];
+      // Names that do not come from sites.js are left alone.
+      var foreign = function (name) {
+        return hasOwn(items.sites_custom, name) || hasOwn(items.sites_updated, name);
+      };
+      var garbled = function (name) {
+        return hasNonAscii(name) && !hasOwn(defaults, name) && !foreign(name);
+      };
+      var accented = Object.keys(defaults || {}).filter(function (name) {
+        return hasNonAscii(name) && !foreign(name) && defaults[name] && typeof defaults[name].domain === 'string';
+      });
+
+      if (accented.length && Object.keys(sites).length) {
+        var byDomain = {};
+        accented.forEach(function (name) {
+          if (!hasOwn(byDomain, defaults[name].domain)) byDomain[defaults[name].domain] = name;
+        });
+        var fixed = {};
+        Object.keys(sites).forEach(function (key) {
+          var name = key;
+          if (garbled(key) && typeof sites[key] === 'string' && hasOwn(byDomain, sites[key]) && !hasOwn(sites, byDomain[sites[key]])) {
+            name = byDomain[sites[key]];
+            result.renamed++;
+          }
+          fixed[name] = sites[key];
+        });
+        // The sites setDefaultOptions() of background.js enables, in two parts:
+        // those the options page could not match, and the others.
+        var dropped = [];
+        var others = [];
+        Object.keys(defaults).forEach(function (name) {
+          var domain = defaults[name] && defaults[name].domain;
+          if (typeof domain !== 'string' || !domain || /^(###$|#options_(disable|optin)_)/.test(domain) || foreign(name)) return;
+          (hasNonAscii(plainName(name)) ? dropped : others).push(name);
+        });
+        var stored = {};
+        Object.keys(fixed).forEach(function (key) { stored[plainName(key)] = true; });
+        var isStored = function (name) {
+          return hasOwn(stored, plainName(name));
+        };
+        if (dropped.length && !dropped.some(isStored) && others.filter(isStored).length >= 0.9 * others.length) {
+          dropped.forEach(function (name) {
+            if (excluded.indexOf(defaults[name].domain) >= 0) return;
+            fixed[name] = defaults[name].domain;
+            result.restored++;
+          });
+        }
+        if (result.renamed || result.restored) changes.sites = fixed;
+      }
+
+      if (Array.isArray(items.sites_default) && items.sites_default.some(garbled)) {
+        var known = items.sites_default.filter(function (name) { return !garbled(name); });
+        accented.forEach(function (name) {
+          if (/^(#options_|###$)/.test(defaults[name].domain) || known.indexOf(name) >= 0) return;
+          known.push(name);
+          result.known++;
+        });
+        changes.sites_default = known;
+      }
+
+      changes[NAMES_KEY] = result;
+      return Promise.resolve(api.storage.local.set(changes)).then(function () {
+        report.siteNames = result;
+        return result;
+      });
+    }).catch(function (e) {
+      recordError('site name repair failed: ' + (e && e.message || e));
+      return null;
+    });
+  }
+
+  // background.js asks for the options page from several places during the
+  // first start; open it once.
+  var lastOptionsPage = 0;
+  function openOptionsPage() {
+    var now = Date.now();
+    if (now - lastOptionsPage < 5000) return Promise.resolve();
+    lastOptionsPage = now;
+    return Promise.resolve(api.runtime.openOptionsPage()).catch(function () {});
+  }
+
   var bpcSafari = {
     getSelf: getSelf,
     updateSessionRules: updateSessionRules,
     offscreenParse: offscreenParse,
+    firstRun: firstRun,
+    repairSiteNames: repairSiteNames,
+    openOptionsPage: openOptionsPage,
     report: report,
     // exposed for tests
+    _crawler: { refusedBy: crawlerRefusedBy, cleared: crawlerCleared, fine: crawlerFine, navigations: navigations, looksDenied: looksDenied, ruleDomain: ruleDomain, STALL_MS: STALL_MS },
+    _diagnostics: diagnostics,
+    _isMarker: isMarker,
+    _MARKER_ID: MARKER_ID,
     _rewriteRegex: rewriteRegex,
     _parseRegex: parseRegex,
     _webkitRegexProblem: webkitRegexProblem,

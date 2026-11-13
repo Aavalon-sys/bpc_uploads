@@ -55,3 +55,5 @@ if [ -z "$PROJECT" ]; then
   exit 1
 fi
 echo "Xcode project: $PROJECT"
+# The converter writes version 1.0 (1) every time; use this build's numbers.
+node "$(dirname "$0")/set-version.mjs" "$EXT_DIR" "$PROJECT"

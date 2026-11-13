@@ -10,6 +10,32 @@
 
 const atLeast = (v, major, minor = 0) => v[0] > major || (v[0] === major && v[1] >= minor);
 
+// Request/response header names modifyHeaders may name. Every released WebKit
+// with web-extension support (branches safari-7618 to safari-7625, Safari 17.4
+// and later) validates against this fixed list and rejects the whole update
+// for any other name ("The header `X-Forwarded-For` is not recognized.").
+export const ACCEPTED_HEADER_NAMES = new Set([
+  'accept', 'accept-charset', 'accept-language', 'accept-encoding', 'accept-ranges',
+  'access-control-allow-credentials', 'access-control-allow-headers', 'access-control-allow-methods',
+  'access-control-allow-origin', 'access-control-expose-headers', 'access-control-max-age',
+  'access-control-request-headers', 'access-control-request-method', 'age', 'authorization', 'cache-control',
+  'connection', 'content-disposition', 'content-encoding', 'content-language', 'content-length',
+  'content-location', 'content-security-policy', 'content-security-policy-report-only', 'content-type',
+  'content-range', 'cookie', 'cookie2', 'cross-origin-embedder-policy',
+  'cross-origin-embedder-policy-report-only', 'cross-origin-opener-policy',
+  'cross-origin-opener-policy-report-only', 'cross-origin-resource-policy', 'date', 'dnt', 'default-style',
+  'etag', 'expect', 'expires', 'host', 'if-match', 'if-modified-since', 'if-none-match', 'if-range',
+  'if-unmodified-since', 'keep-alive', 'last-event-id', 'last-modified', 'link', 'location', 'origin',
+  'ping-from', 'ping-to', 'purpose', 'pragma', 'proxy-authorization', 'range', 'referer', 'referrer-policy',
+  'refresh', 'report-to', 'reporting-endpoints', 'sec-fetch-dest', 'sec-fetch-mode', 'sec-gpc',
+  'sec-websocket-accept', 'sec-websocket-extensions', 'sec-websocket-key', 'sec-websocket-protocol',
+  'sec-websocket-version', 'server-timing', 'service-worker', 'service-worker-allowed',
+  'service-worker-navigation-preload', 'set-cookie', 'set-cookie2', 'sourcemap', 'te', 'timing-allow-origin',
+  'trailer', 'transfer-encoding', 'upgrade', 'upgrade-insecure-requests', 'user-agent', 'vary', 'via',
+  'x-content-type-options', 'x-dns-prefetch-control', 'x-frame-options', 'x-sourcemap', 'x-xss-protection',
+  'x-temp-tablet', 'icy-metaint', 'icy-metadata',
+]);
+
 const RESOURCE_TYPES = new Set([
   'main_frame', 'sub_frame', 'stylesheet', 'script', 'image', 'font',
   'xmlhttprequest', 'ping', 'media', 'websocket', 'other',
@@ -77,6 +103,12 @@ export function safariRuleProblems(rule, version = [17, 0]) {
       if (!atLeast(version, 16, 4)) problems.push('modifyHeaders needs Safari 16.4');
       if (action.responseHeaders) problems.push('responseHeaders are not supported');
       if (!action.requestHeaders || !action.requestHeaders.length) problems.push('modifyHeaders without requestHeaders');
+      for (const h of action.requestHeaders || []) {
+        if (!ACCEPTED_HEADER_NAMES.has(String(h.header).toLowerCase())) {
+          problems.push(`The header \`${h.header}\` is not recognized.`);
+          break;
+        }
+      }
       break;
     default:
       problems.push(`unsupported action ${action.type}`);
@@ -105,4 +137,14 @@ export function safariRuleProblems(rule, version = [17, 0]) {
   if ((condition.domains || condition.initiatorDomains) && (condition.excludedDomains || condition.excludedInitiatorDomains))
     problems.push('both included and excluded initiator domains');
   return problems;
+}
+
+// Rules that pass Safari's validation but make its content blocker compiler
+// fail. Safari then silently restores the previous rules and still reports
+// success (seen in the WebKit engine test, safari/engine).
+//  - An empty excludedInitiatorDomains / excludedDomains list becomes an empty
+//    unless-frame-url / unless-domain condition list (JSONInvalidConditionList).
+export function uncompilable(rule) {
+  const c = rule.condition || {};
+  return ['excludedInitiatorDomains', 'excludedDomains'].some((key) => Array.isArray(c[key]) && c[key].length === 0);
 }

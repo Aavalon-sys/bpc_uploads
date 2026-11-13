@@ -5,15 +5,29 @@
 // flavor 'chrome': Chrome-like API (management + offscreen present, the
 //                  background is a service worker that calls importScripts).
 // flavor 'safari': Safari-like API (no management, no offscreen, background
-//                  scripts listed in manifest.background.scripts) with a DNR
-//                  mock that rejects a whole update when one rule is invalid,
-//                  using the approximate WebKit rule/regex checks in
-//                  webkit-rules.mjs.
+//                  scripts listed in manifest.background.scripts and read as
+//                  Windows-1252) with a DNR mock that rejects a whole update when
+//                  one rule is invalid, using the approximate WebKit
+//                  rule/regex checks in webkit-rules.mjs.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
-import { safariRuleProblems, webkitRegexProblem } from './webkit-rules.mjs';
+import { safariRuleProblems, uncompilable, webkitRegexProblem } from './webkit-rules.mjs';
+
+// The rule the Safari build adds to every update to verify it took effect.
+const MARKER_ID = 9000000;
+
+// Released Safari versions read the scripts of the background page as
+// Windows-1252 ("Latin-1"): the page WebKit generates for them declares no
+// character set. garble() shows a UTF-8 text the way such a reader sees it.
+const CP1252 = '\u20ac\u0081\u201a\u0192\u201e\u2026\u2020\u2021\u02c6\u2030\u0160\u2039\u0152\u008d\u017d\u008f\u0090\u2018\u2019\u201c\u201d\u2022\u2013\u2014\u02dc\u2122\u0161\u203a\u0153\u009d\u017e\u0178';
+export function readAsWindows1252(bytes) {
+  let text = '';
+  for (const b of bytes) text += b >= 0x80 && b <= 0x9f ? CP1252[b - 0x80] : String.fromCharCode(b);
+  return text;
+}
+export const garble = (text) => readAsWindows1252(Buffer.from(text, 'utf8'));
 
 function makeEvent() {
   const listeners = [];
@@ -36,11 +50,16 @@ export async function runBackground({
   settleMs = 1500,
   extraRuleCheck = null, // (rule) => problem string or null, to simulate other Safari refusals
   errorStyle = 'plain', // 'webkit': "Rule with id N is invalid. ..." like Safari reports it
+  fireInstalled = true, // false: like an extension first loaded while Safari starts (no install event)
+  silentRefusal = null, // (rule) => true: Safari accepts the update, cannot compile it and silently restores the old rules
+  initialStore = null, // extension storage left by an earlier run
 } = {}) {
   const manifest = JSON.parse(fs.readFileSync(path.join(extDir, 'manifest.json'), 'utf8'));
-  const store = {};
+  const store = initialStore ? structuredClone(initialStore) : {};
+  let silentRollbacks = 0;
   const dnrCalls = [];
   const dnrErrors = [];
+  const scriptCalls = [];
   const sessionRules = new Map();
   const errors = [];
   const logs = [];
@@ -130,6 +149,11 @@ export async function runBackground({
       if (extra) problem(rule.id, extra);
     }
     if (problems.length) return problems;
+    if (add.some((rule) => (flavor === 'safari' && uncompilable(rule)) || (silentRefusal && silentRefusal(rule)))) {
+      // Stored, failed to compile, rolled back: nothing changes, no error.
+      silentRollbacks++;
+      return null;
+    }
     for (const id of remove) sessionRules.delete(id);
     for (const rule of add) sessionRules.set(rule.id, structuredClone(rule));
     return null;
@@ -179,6 +203,7 @@ export async function runBackground({
     tabs: {
       onUpdated: makeEvent(),
       onActivated: makeEvent(),
+      onRemoved: makeEvent(),
       query: (q, cb) => { if (cb) later(() => cb([])); return Promise.resolve([]); },
       get: (id, cb) => { if (cb) later(() => cb({ id })); return Promise.resolve({ id }); },
       reload: () => Promise.resolve(),
@@ -204,7 +229,19 @@ export async function runBackground({
       request: (p, cb) => { if (cb) later(() => cb(true)); return Promise.resolve(true); },
       remove: (p, cb) => { if (cb) later(() => cb(true)); return Promise.resolve(true); },
     },
-    scripting: { executeScript: () => Promise.resolve([]) },
+    scripting: {
+      executeScript: (details) => {
+        scriptCalls.push(JSON.parse(JSON.stringify(details, (k, v) => (typeof v === 'function' ? '[function]' : v))));
+        return Promise.resolve([{ frameId: 0, result: undefined }]);
+      },
+    },
+    webNavigation: {
+      onBeforeNavigate: makeEvent(),
+      onCommitted: makeEvent(),
+      onDOMContentLoaded: makeEvent(),
+      onCompleted: makeEvent(),
+      onErrorOccurred: makeEvent(),
+    },
     webRequest: {
       onBeforeRequest: makeEvent(),
       onHeadersReceived: makeEvent(),
@@ -264,7 +301,8 @@ export async function runBackground({
 
   const runFile = (rel) => {
     const file = path.join(extDir, rel.replace(/^\//, ''));
-    vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: file });
+    const code = flavor === 'safari' ? readAsWindows1252(fs.readFileSync(file)) : fs.readFileSync(file, 'utf8');
+    vm.runInContext(code, sandbox, { filename: file });
   };
   if (flavor === 'chrome') sandbox.importScripts = (...files) => files.forEach(runFile);
 
@@ -278,7 +316,7 @@ export async function runBackground({
   }
 
   // Simulate a fresh install: the browser fires runtime.onInstalled.
-  if (!loadError) {
+  if (!loadError && fireInstalled) {
     later(() => {
       for (const l of runtime.onInstalled.listeners) {
         try { l({ reason: 'install' }); } catch (e) { errors.push(e); }
@@ -290,14 +328,18 @@ export async function runBackground({
   return {
     api,
     settle: (ms = settleMs) => new Promise((r) => setTimeout(r, ms)),
-    currentRules: () => [...sessionRules.values()].map((r) => structuredClone(r)),
+    currentRules: () => [...sessionRules.values()].filter((r) => r.id !== MARKER_ID).map((r) => structuredClone(r)),
+    currentMarker: () => structuredClone(sessionRules.get(MARKER_ID) || null),
+    silentRollbacks: () => silentRollbacks,
     manifest,
     loadError,
     errors,
     logs,
     dnrCalls,
     dnrErrors,
-    sessionRules: [...sessionRules.values()],
+    scriptCalls,
+    // Without the marker rule the Safari build adds to verify its updates.
+    sessionRules: [...sessionRules.values()].filter((r) => r.id !== MARKER_ID),
     optionsOpened,
     store,
     sandbox,
