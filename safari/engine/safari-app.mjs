@@ -53,33 +53,47 @@ const screenshot = (name) => {
 // for other websites and always allow. It needs the accessibility permission
 // that CI machines give to osascript.
 const ANSWER_SHEETS = `
-tell application "System Events"
-  if not (exists process "Safari") then return "none"
-  tell process "Safari"
-    repeat with w in windows
-      if exists sheet 1 of w then
-        set s to sheet 1 of w
-        set labels to ""
+on answerIn(theArea, placeName)
+  tell application "System Events"
+    repeat with theChoice in {"Always Allow on Every Website", "Always Allow", "Continue Session"}
+      set choiceName to theChoice as text
+      if exists (button choiceName of theArea) then
+        set shownText to ""
         try
-          set labels to (value of static texts of s) as text
+          set shownText to (value of static texts of theArea) as text
         end try
-        repeat with wanted in {"Always Allow on Every Website", "Always Allow", "Continue Session"}
-          if exists (button (wanted as text) of s) then
-            try
-              set box to first checkbox of s
-              if value of box is 0 then click box
-              delay 0.3
-            end try
-            click button (wanted as text) of s
-            return "clicked " & (wanted as text) & ": " & labels
-          end if
-        end repeat
-        return "unknown sheet: " & labels & " buttons: " & ((name of buttons of s) as text)
+        try
+          set theCheck to first checkbox of theArea
+          if value of theCheck is 0 then click theCheck
+          delay 0.3
+        end try
+        click button choiceName of theArea
+        return "clicked " & choiceName & " in " & placeName & ": " & shownText
       end if
     end repeat
   end tell
+  return ""
+end answerIn
+
+tell application "System Events"
+  if not (exists process "Safari") then return "none"
+  tell process "Safari"
+    set seenWindows to ""
+    repeat with theWindow in windows
+      -- The question is an alert window of its own, or a sheet on a window.
+      set outcome to my answerIn(contents of theWindow, "window")
+      if outcome is not "" then return outcome
+      if exists sheet 1 of theWindow then
+        set outcome to my answerIn(sheet 1 of theWindow, "sheet")
+        if outcome is not "" then return outcome
+      end if
+      try
+        set seenWindows to seenWindows & "[" & (subrole of theWindow) & " '" & (name of theWindow) & "' buttons: " & ((name of buttons of theWindow) as text) & "] "
+      end try
+    end repeat
+    return "windows: " & seenWindows
+  end tell
 end tell
-return "none"
 `;
 let answering = false;
 let lastSheet = '';
@@ -90,9 +104,10 @@ function answerSheets() {
     answering = false;
     const out = String(stdout || '').trim();
     const text = error ? 'osascript: ' + String(stderr || error.message).trim().slice(0, 300) : out;
-    if (text && text !== 'none' && text !== lastSheet) event('sheet', text);
+    // Logged when it changes: a click, an error, or the windows Safari has.
+    if (text && text !== 'none' && text !== lastSheet) event('sheet', text.slice(0, 700));
     if (text.startsWith('clicked')) screenshot(`sheet${result.events.filter((e) => e.type === 'sheet').length}`);
-    lastSheet = text === 'none' ? '' : text;
+    lastSheet = text;
   });
 }
 
