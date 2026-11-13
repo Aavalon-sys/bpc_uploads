@@ -135,7 +135,11 @@ function scenario(name, expect, { optional = false } = {}) {
     const mine = requests.filter((r) => r.host === url.hostname);
     // A second visit to a site has a query string of its own. Where the
     // extension loaded the page again, the last request is the one that counts.
-    const docs = mine.filter((r) => r.path === url.pathname + url.search);
+    const asked = mine.filter((r) => r.path === url.pathname + url.search);
+    // The page asking for itself again as Google's crawler (the article from the crawler's copy).
+    const isCopy = (r) => GOOGLEBOT.test(r.userAgent || '') && !!r.xForwardedFor;
+    const copies = asked.filter(isCopy);
+    const docs = asked.filter((r) => !isCopy(r));
     const doc = docs[docs.length - 1];
     const label = url.hostname + (page.phase ? ` (${page.phase})` : '');
     const fetched = Object.fromEntries(Object.entries(site.scripts).map(([n, src]) => [n, mine.some((r) => r.path === src)]));
@@ -146,6 +150,7 @@ function scenario(name, expect, { optional = false } = {}) {
     console.log(`     document request${docs.length > 1 ? ` (last of ${docs.length})` : ''}: ${doc ? JSON.stringify({ userAgent: doc.userAgent, referer: doc.referer, cookie: doc.cookie, xForwardedFor: doc.xForwardedFor }) : 'NOT RECEIVED'}`);
     console.log(`     scripts fetched: ${JSON.stringify(fetched)} | ran in page: ${JSON.stringify(p.ran)}`);
     console.log(`     page: ${p.error ? 'ERROR ' + p.error : JSON.stringify({ probes: p.probes, cookie: p.cookie })}`);
+    if (site.article) console.log(`     article paragraphs shown: ${JSON.stringify(p.paragraphs)} | crawler copy: ${JSON.stringify(p.crawlerCopy)} | requests for it: ${JSON.stringify(copies.map((r) => ({ userAgent: r.userAgent, xForwardedFor: r.xForwardedFor, referer: r.referer, dest: r.dest })))}`);
     console.log(`     page world: ${JSON.stringify(p.world)}`);
     if (app) console.log(`     style elements the content script added: ${JSON.stringify(p.styles)}`);
     else console.log(`     content world: ${JSON.stringify(cw)}`);
@@ -161,8 +166,15 @@ function scenario(name, expect, { optional = false } = {}) {
     if ((expect === 'working' || app) && supported) {
       for (const [header, pattern] of Object.entries(EXPECTED_HEADERS[url.hostname] || {}))
         check(name, !!doc && pattern.test(doc[header] || ''), `${label}: document request has ${header} matching ${pattern} (got ${JSON.stringify(doc && doc[header])})`);
-      if (site.crawler === 'never sent')
-        check(name, mine.length > 0 && mine.every((r) => !GOOGLEBOT.test(r.userAgent || '')), `${label}: no request claims to be Googlebot (${mine.filter((r) => GOOGLEBOT.test(r.userAgent || '')).length} of ${mine.length} did)`);
+      if (site.crawler === 'never sent') {
+        const bare = mine.filter((r) => GOOGLEBOT.test(r.userAgent || '') && !r.xForwardedFor);
+        check(name, mine.length > 0 && !bare.length, `${label}: no request claims to be Googlebot without Google's address (${bare.length} of ${mine.length} did)`);
+      }
+      if (site.article) {
+        const all = Array.from({ length: site.article.all }, (_, i) => i + 1);
+        check(name, copies.length === 1 && copies[0].xForwardedFor === '66.249.66.1', `${label}: the page asked once for the crawler's copy, with Googlebot's user agent and address (${copies.length} such requests)`);
+        check(name, JSON.stringify(p.paragraphs) === JSON.stringify(all) && p.crawlerCopy === 'replaced', `${label}: the whole article is shown (paragraphs ${JSON.stringify(p.paragraphs)}, ${JSON.stringify(p.crawlerCopy)})`);
+      }
       if (site.crawler === 'found out') {
         // The first visit in a profile finds out; after that the site is remembered.
         const first = !page.phase;
@@ -184,6 +196,7 @@ function scenario(name, expect, { optional = false } = {}) {
       // Unsupported site, or the extension has no access: nothing may change.
       check(name, !!doc && !GOOGLEBOT.test(doc.userAgent || '') && !/google|drudge/.test(doc.referer || ''), `${label}: request headers untouched`);
       check(name, !injected && !(p.world && p.world.contentScript), `${label}: no content script`);
+      if (site.article) check(name, !copies.length && JSON.stringify(p.paragraphs) === JSON.stringify(Array.from({ length: site.article.free }, (_, i) => i + 1)), `${label}: the page is as the site serves it (paragraphs ${JSON.stringify(p.paragraphs)}, ${copies.length} requests as crawler)`);
       if (!supported)
         check(name, Object.values(fetched).every(Boolean), `${label}: no script blocked`);
     }
