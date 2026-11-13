@@ -21,9 +21,14 @@ if (!dir) {
 }
 
 const GOOGLEBOT = /Googlebot\/2\.1/;
+const GOOGLE = /^https:\/\/www\.google\.com\/$/;
 const EXPECTED_HEADERS = {
   // X-Forwarded-For is part of the Chrome rule too, but Safari refuses to set it.
-  'www.washingtonpost.com': { userAgent: GOOGLEBOT, referer: /^https:\/\/www\.google\.com\/$/ },
+  'www.nbcnews.com': { userAgent: GOOGLEBOT, referer: GOOGLE },
+  // Sites that refuse a Googlebot without Google's address: the rest of the rule still applies.
+  'www.washingtonpost.com': { referer: GOOGLE },
+  'www.dallasnews.com': { referer: GOOGLE },
+  'www.ajc.com': { referer: GOOGLE },
   'www.nytimes.com': { userAgent: /Google-InspectionTool/ },
   'www.ft.com': { referer: /^https:\/\/www\.google\.com\/$/ },
   'www.wsj.com': { referer: /^https:\/\/www\.drudgereport\.com\/$/ },
@@ -63,6 +68,8 @@ function describeBackground(label, bg) {
   console.log(`      compat: version=${JSON.stringify(c.safariVersion)} legacyDomainKeys=${c.legacyDomainKeys} lastAddCall=${JSON.stringify(c.lastAddCall)} errors=${JSON.stringify(c.errors)}`);
   for (const u of (c.lastAddCall && c.lastAddCall.uncompilable) || []) console.log(`      SKIPPED rule ${u.id}: ${u.reason} ${JSON.stringify(u.rule)}`);
   console.log(`      remembered as refused: ${JSON.stringify(bg.refused)}`);
+  console.log(`      no crawler user agent for: ${JSON.stringify(bg.crawler && bg.crawler.refusedBy)} stored: ${JSON.stringify(bg.crawler && bg.crawler.stored)}`);
+  for (const n of (bg.crawler && bg.crawler.notes) || []) console.log(`        ${n.at} ${n.domain}: ${n.note}`);
   console.log(`      manifest keys: ${(bg.manifestKeys || []).join(',')} | chrome=${bg.hasChrome} browser=${bg.hasBrowser} extChromium=${bg.extChromium} selfHosted=${bg.selfHosted}`);
   console.log(`      permissions: ${JSON.stringify(bg.permissions)} origins=${bg.origins} ${JSON.stringify(bg.originsSample)}`);
   console.log(`      storage keys: ${(bg.storageKeys || []).join(',')}`);
@@ -126,15 +133,17 @@ function scenario(name, expect, { optional = false } = {}) {
     const url = new URL(page.requested);
     const site = SITES[url.hostname] || { scripts: {}, blocked: [] };
     const mine = requests.filter((r) => r.host === url.hostname);
-    // A second visit to a site has a query string of its own.
-    const doc = mine.find((r) => r.path === url.pathname + url.search);
+    // A second visit to a site has a query string of its own. Where the
+    // extension loaded the page again, the last request is the one that counts.
+    const docs = mine.filter((r) => r.path === url.pathname + url.search);
+    const doc = docs[docs.length - 1];
     const label = url.hostname + (page.phase ? ` (${page.phase})` : '');
     const fetched = Object.fromEntries(Object.entries(site.scripts).map(([n, src]) => [n, mine.some((r) => r.path === src)]));
     const p = page.page || {};
     const cw = page.contentWorld || {};
     console.log(`\n  -- ${label}: ${site.rule || '?'}`);
     console.log(`     finished=${page.finished} error=${page.navigationError || '-'} hasAccess=${page.hasAccess}`);
-    console.log(`     document request: ${doc ? JSON.stringify({ userAgent: doc.userAgent, referer: doc.referer, cookie: doc.cookie, xForwardedFor: doc.xForwardedFor }) : 'NOT RECEIVED'}`);
+    console.log(`     document request${docs.length > 1 ? ` (last of ${docs.length})` : ''}: ${doc ? JSON.stringify({ userAgent: doc.userAgent, referer: doc.referer, cookie: doc.cookie, xForwardedFor: doc.xForwardedFor }) : 'NOT RECEIVED'}`);
     console.log(`     scripts fetched: ${JSON.stringify(fetched)} | ran in page: ${JSON.stringify(p.ran)}`);
     console.log(`     page: ${p.error ? 'ERROR ' + p.error : JSON.stringify({ probes: p.probes, cookie: p.cookie })}`);
     console.log(`     page world: ${JSON.stringify(p.world)}`);
@@ -152,6 +161,15 @@ function scenario(name, expect, { optional = false } = {}) {
     if ((expect === 'working' || app) && supported) {
       for (const [header, pattern] of Object.entries(EXPECTED_HEADERS[url.hostname] || {}))
         check(name, !!doc && pattern.test(doc[header] || ''), `${label}: document request has ${header} matching ${pattern} (got ${JSON.stringify(doc && doc[header])})`);
+      if (site.crawler === 'never sent')
+        check(name, mine.length > 0 && mine.every((r) => !GOOGLEBOT.test(r.userAgent || '')), `${label}: no request claims to be Googlebot (${mine.filter((r) => GOOGLEBOT.test(r.userAgent || '')).length} of ${mine.length} did)`);
+      if (site.crawler === 'found out') {
+        // The first visit in a profile finds out; after that the site is remembered.
+        const first = !page.phase;
+        if (first) check(name, docs.length >= 2 && GOOGLEBOT.test(docs[0].userAgent || ''), `${label}: the first request claimed to be Googlebot and was refused (${docs.length} document requests)`);
+        check(name, !!doc && !GOOGLEBOT.test(doc.userAgent || ''), `${label}: the page was then loaded without the Googlebot user agent (got ${JSON.stringify(doc && doc.userAgent)})`);
+        check(name, (p.probes || {}).content !== undefined, `${label}: the article is shown, not the denial`);
+      }
       for (const blocked of site.blocked)
         check(name, fetched[blocked] === false && !(p.ran || {})[blocked], `${label}: script "${blocked}" is blocked`);
       check(name, fetched.ok === true && (p.ran || {}).ok === '1', `${label}: control script still loads`);
@@ -186,6 +204,11 @@ function scenario(name, expect, { optional = false } = {}) {
       const last = (bg.compat && bg.compat.lastAddCall) || {};
       check(name, last.batchRejected === false, `a later start of the background page installs the rules without a refused attempt (${JSON.stringify(last.batchRejected)})`);
     }
+    // The sites that refused the Googlebot user agent in this run are remembered, the known one is listed.
+    const found = (result.pages || []).map((pg) => new URL(pg.requested).hostname).filter((h) => (SITES[h] || {}).crawler === 'found out').map((h) => h.replace(/^www\./, ''));
+    const refusedBy = (bg.crawler && bg.crawler.refusedBy) || [];
+    const rememberedSites = Object.keys((bg.crawler && bg.crawler.stored && bg.crawler.stored.refusedBy) || {});
+    check(name, refusedBy.includes('washingtonpost.com') && found.every((d) => refusedBy.includes(d) && rememberedSites.includes(d)), `sites that refuse a fake Googlebot get no crawler user agent (${JSON.stringify(refusedBy)}; found in this run: ${JSON.stringify(found)})`);
     check(name, bg.backgroundLoaded === true, 'background scripts loaded');
     check(name, bg.enabledSites > 500, `sites are enabled (${bg.enabledSites})`);
     check(name, bg.sessionRules > 700, `blocking/header rules are installed (${bg.sessionRules})`);

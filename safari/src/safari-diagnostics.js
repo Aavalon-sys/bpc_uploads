@@ -102,6 +102,8 @@
         if (bg.backgroundLoaded === false) say('bad', '后台脚本没有完整加载（background.js 未运行）。');
         if (bg.errors && bg.errors.length) say('warn', '后台页有 ' + bg.errors.length + ' 个报错，见下方 background.errors。');
         if (siteHost && bg.siteEnabled === false) say('warn', '当前网站不在已启用的站点里（不受支持，或在 Options 里没有勾选）。');
+        // Safari cannot send the address of Google's crawler along with its user agent.
+        if (bg.siteRefusesCrawler) say('warn', '这个网站会拒绝“自称 Googlebot、却不是从 Google 的地址发出”的请求，而 Safari 不允许扩展伪造来源地址，所以扩展没有对它伪装成 Googlebot。页面可以正常打开，其余措施（屏蔽脚本、Referer、内容脚本）照常生效，但这个网站的付费墙不一定能绕过。');
         // Rules Safari cannot express are left out on purpose (see README); anything else is unexpected.
         var expected = ['responseHeaders not supported by Safari', 'only modifies request headers Safari refuses'];
         var dropped = (bg.lastAddCall && bg.lastAddCall.dropped) || {};

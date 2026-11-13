@@ -273,8 +273,17 @@ static id callJSON(WKWebView *webView, NSString *body, WKContentWorld *world, NS
     [self changed:WKWebExtensionTabChangedPropertiesLoading | WKWebExtensionTabChangedPropertiesTitle];
 }
 
+// A navigation that was replaced by another one (the extension loads a page
+// again, for example) is not a failed page load.
+static BOOL wasReplaced(NSError *error)
+{
+    return [error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled;
+}
+
 - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error
 {
+    if (wasReplaced(error))
+        return;
     _finished = YES;
     _lastError = error.localizedDescription;
     [self changed:WKWebExtensionTabChangedPropertiesLoading];
@@ -282,6 +291,8 @@ static id callJSON(WKWebView *webView, NSString *body, WKContentWorld *world, NS
 
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error
 {
+    if (wasReplaced(error))
+        return;
     _finished = YES;
     _lastError = error.localizedDescription;
     [self changed:WKWebExtensionTabChangedPropertiesLoading];
@@ -426,6 +437,7 @@ static NSString * const kBackgroundProbe = @""
     "  out.storedSites = stored.sites ? Object.keys(stored.sites).length : null;"
     "  out.storedSiteNames = stored.sites ? Object.keys(stored.sites) : null;"
     "  out.refused = stored.bpc_safari_refused_2 || null;"
+    "  out.crawler = typeof bpcSafari === 'object' ? { stored: stored.bpc_safari_crawler || null, refusedBy: bpcSafari._diagnostics('').crawlerRefusedBy, notes: bpcSafari.report.crawler } : null;"
     "  const rules = await api.declarativeNetRequest.getSessionRules();"
     "  out.sessionRules = rules.length;"
     "  const byType = {}; for (const r of rules) byType[r.action.type] = (byType[r.action.type] || 0) + 1;"

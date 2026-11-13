@@ -117,3 +117,12 @@ test('rules Safari cannot express are no cause for alarm, other refusals are', a
   const alarmed = await runDiagnostics(api({ background: odd }));
   assert.ok(alarmed.verdict.some((v) => v.startsWith('warn: ') && v.includes('Safari cannot compile this rule')), alarmed.verdict.join('\n'));
 });
+
+test('a site that refuses the Googlebot user agent is explained', async () => {
+  const refusing = { ...healthy, crawlerRefusedBy: ['washingtonpost.com', 'nytimes.com'], siteRefusesCrawler: true, crawlerNotes: [] };
+  const { verdict, report } = await runDiagnostics(api({ background: refusing }));
+  assert.ok(verdict.some((v) => v.startsWith('warn: ') && v.includes('Googlebot') && v.includes('页面可以正常打开')), verdict.join('\n'));
+  assert.match(report, /"crawlerRefusedBy":\["washingtonpost\.com","nytimes\.com"\]/);
+  const fine = await runDiagnostics(api({ background: { ...healthy, crawlerRefusedBy: ['washingtonpost.com'], siteRefusesCrawler: false } }));
+  assert.deepEqual(fine.verdict.filter((v) => !v.startsWith('ok: ')), []);
+});

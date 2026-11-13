@@ -223,8 +223,19 @@ async function main() {
       if (phase) page.phase = phase;
       const nav = await wd('POST', `${s}/url`, { url }, 30);
       page.finished = !failed(nav);
-      if (!page.finished) page.navigationError = JSON.stringify(nav.value).slice(0, 300);
-      event('navigate', { url, ok: page.finished, error: page.navigationError });
+      if (!page.finished) {
+        // The extension may have loaded the page again while WebDriver waited
+        // for the first attempt (a site that refuses the Googlebot user agent).
+        const note = JSON.stringify(nav.value).slice(0, 300);
+        for (let i = 0; i < 10 && !page.finished; i++) {
+          await sleep(1);
+          const state = await wd('POST', `${s}/execute/sync`, { script: 'return [location.href, document.readyState];', args: [] }, 10);
+          page.finished = Array.isArray(state.value) && state.value[0] === url && state.value[1] === 'complete';
+        }
+        if (page.finished) page.navigationNote = note;
+        else page.navigationError = note;
+      }
+      event('navigate', { url, ok: page.finished, error: page.navigationError, note: page.navigationNote });
       await sleep(Number(args.settle));
       const probe = await wd('POST', `${s}/execute/sync`, { script: PAGE_PROBE, args: [] }, 20);
       try {

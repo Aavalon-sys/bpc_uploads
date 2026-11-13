@@ -23,10 +23,34 @@ import net from 'node:net';
 // What each test page contains. `blocked` scripts match a block rule of the
 // extension for that site and must never be requested; `ok` is a control.
 export const SITES = {
+  'www.nbcnews.com': {
+    rule: 'Googlebot user agent + Google referer',
+    scripts: { ok: '/ok.js?n=ok' },
+    blocked: [],
+  },
+  // Three sites that, like the real washingtonpost.com, refuse a request that
+  // claims to be Googlebot but does not come from Google's address (Safari
+  // cannot send the X-Forwarded-For header that makes it look as if it did).
   'www.washingtonpost.com': {
-    rule: 'Googlebot user agent + Google referer + blocked script',
+    rule: 'known to refuse a fake Googlebot: Google referer + blocked script, no Googlebot user agent',
     scripts: { ok: '/ok.js?n=ok', tetro: '/x/tetro-client/a.js?n=tetro' },
     blocked: ['tetro'],
+    refusesCrawler: 'stall',
+    crawler: 'never sent',
+  },
+  'www.dallasnews.com': {
+    rule: 'never answers a fake Googlebot: the extension finds out and loads the page without the user agent',
+    scripts: { ok: '/ok.js?n=ok' },
+    blocked: [],
+    refusesCrawler: 'stall',
+    crawler: 'found out',
+  },
+  'www.ajc.com': {
+    rule: 'answers a fake Googlebot with a denial page: the extension finds out and loads the page without the user agent',
+    scripts: { ok: '/ok.js?n=ok' },
+    blocked: [],
+    refusesCrawler: 'deny',
+    crawler: 'found out',
   },
   'www.nytimes.com': {
     rule: 'custom user agent + blocked script (rewritten regex)',
@@ -113,6 +137,15 @@ function handler(scheme, logFile, proxyPort) {
       xForwardedFor: req.headers['x-forwarded-for'] || null,
       dest: req.headers['sec-fetch-dest'] || null,
     }) + '\n');
+
+    // A site that checks where Googlebot comes from: no answer at all, or a denial.
+    const site = SITES[host];
+    if (site && site.refusesCrawler && /Googlebot/i.test(req.headers['user-agent'] || '') && !req.headers['x-forwarded-for']) {
+      if (site.refusesCrawler === 'stall') return;
+      res.writeHead(403, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      res.end('<!doctype html><html><head><title>Access Denied</title></head><body><h1>Access Denied</h1><p>You don\'t have permission to access this page on this server.</p><p>Reference #18.2f3a1602.1700000000.1a2b3c4d</p></body></html>\n');
+      return;
+    }
 
     if (url.pathname.endsWith('.js')) {
       const name = (url.searchParams.get('n') || 'script').replace(/[^a-z0-9]/gi, '');
