@@ -34,8 +34,6 @@ jobs:
           node --version
           networksetup -listallnetworkservices || true
       - name: Run the extension in Safari
-        env:
-          BPC_APP_FIRST_RUN: '1'
         run: safari/engine/safari-app.sh build/safari/app-test
       - name: Upload results
         if: always()

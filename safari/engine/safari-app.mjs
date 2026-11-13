@@ -14,7 +14,7 @@
 // windows, permissions and events are Safari's own. A WebDriver session only
 // reaches the page, so the checks are about what a page and the server see.
 
-import { execFileSync, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 
 const args = { 'driver-port': '4477', settle: '5', wait: '10', url: [] };
@@ -45,6 +45,56 @@ const screenshot = (name) => {
     event('no screenshot', String(e && e.message || e).slice(0, 200));
   }
 };
+
+// Safari asks the user before the extension may touch a website, with a sheet
+// that also stops the WebDriver session. The first one comes right after the
+// first start, when the extension looks for updates on gitflic.ru. This
+// answers such a sheet the way the README tells users to: remember the choice
+// for other websites and always allow. It needs the accessibility permission
+// that CI machines give to osascript.
+const ANSWER_SHEETS = `
+tell application "System Events"
+  if not (exists process "Safari") then return "none"
+  tell process "Safari"
+    repeat with w in windows
+      if exists sheet 1 of w then
+        set s to sheet 1 of w
+        set labels to ""
+        try
+          set labels to (value of static texts of s) as text
+        end try
+        repeat with wanted in {"Always Allow on Every Website", "Always Allow", "Continue Session"}
+          if exists (button (wanted as text) of s) then
+            try
+              set box to first checkbox of s
+              if value of box is 0 then click box
+              delay 0.3
+            end try
+            click button (wanted as text) of s
+            return "clicked " & (wanted as text) & ": " & labels
+          end if
+        end repeat
+        return "unknown sheet: " & labels & " buttons: " & ((name of buttons of s) as text)
+      end if
+    end repeat
+  end tell
+end tell
+return "none"
+`;
+let answering = false;
+let lastSheet = '';
+function answerSheets() {
+  if (answering) return;
+  answering = true;
+  execFile('osascript', ['-e', ANSWER_SHEETS], { timeout: 12000 }, (error, stdout, stderr) => {
+    answering = false;
+    const out = String(stdout || '').trim();
+    const text = error ? 'osascript: ' + String(stderr || error.message).trim().slice(0, 300) : out;
+    if (text && text !== 'none' && text !== lastSheet) event('sheet', text);
+    if (text.startsWith('clicked')) screenshot(`sheet${result.events.filter((e) => e.type === 'sheet').length}`);
+    lastSheet = text === 'none' ? '' : text;
+  });
+}
 
 const base = `http://127.0.0.1:${args['driver-port']}`;
 async function wd(method, path, body, timeoutSeconds = 60) {
@@ -87,7 +137,15 @@ const PAGE_PROBE = `
 `;
 
 async function main() {
+  // A Safari left over from an earlier session cannot be paired again.
+  try {
+    execFileSync('pkill', ['-x', 'Safari'], { stdio: 'ignore' });
+    await sleep(2);
+  } catch (e) {
+    // not running
+  }
   const driver = spawn('safaridriver', ['-p', args['driver-port']], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const sheets = setInterval(answerSheets, 2000);
   let driverLog = '';
   driver.stdout.on('data', (d) => { driverLog += d; });
   driver.stderr.on('data', (d) => { driverLog += d; });
@@ -125,7 +183,8 @@ async function main() {
       return;
     }
     event('windows right after loading', (await wd('GET', `${s}/window/handles`, undefined, 15)).value);
-    // First start of the extension: default sites, rules, its own pages.
+    // First start of the extension: default sites, rules, and Safari's question
+    // about website access (see ANSWER_SHEETS).
     await sleep(Number(args.wait));
     screenshot('loaded');
     event('windows after the first start', (await wd('GET', `${s}/window/handles`, undefined, 15)).value);
@@ -186,6 +245,7 @@ async function main() {
     result.fatal = String(e && e.message || e);
     event('fatal', result.fatal);
   } finally {
+    clearInterval(sheets);
     if (result.fatal) screenshot('fatal');
     if (sessionId) await wd('DELETE', `/session/${sessionId}`, undefined, 20);
     driver.kill();
