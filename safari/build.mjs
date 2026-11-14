@@ -169,6 +169,40 @@ const PAGE_WORLD_PATCHES = [
   },
 ];
 
+// Fixes for sites whose upstream rule no longer works, applied to sites.js.
+// Each one is a change to the site's rule, written with the options the
+// extension already has (block_regex, cs_code), and must match exactly once:
+// when upstream changes the rule, the build fails and the fix is looked at
+// again (it may no longer be needed).
+export const SITE_FIXES = [
+  {
+    site: 'thehill.com',
+    why: 'The Hill: the Hill Insider paywall (2026) is a dialog over the full article; block the script that opens it, hide it and let the page scroll',
+    // The whole article is in the page. The Nexstar login-registration plugin
+    // opens #login-registration-paywall over it on articles marked
+    // body.is-premium and stops the page from scrolling.
+    find: /("The Hill": \{\r?\n\s*domain: "thehill\.com",\r?\n\s*allow_cookies: 1,\r?\n\s*)block_regex: \/\\\.tinypass\\\.com\\\/\/(\r?\n)/,
+    replace: '$1block_regex: /(\\.tinypass\\.com\\/|\\/lakana\\/inc\\/blueconic\\/scripts\\/login-registration-bc-wall\\.js)/,$2' +
+      '    cs_code: [{add_style: "' + [
+        '#login-registration-paywall{display:none !important}',
+        // The page cannot be scrolled while the dialog is open.
+        'html:has(#login-registration-paywall:not([hidden])),body:has(#login-registration-paywall:not([hidden])),html:has(body.is-premium),body.is-premium' +
+          '{overflow:auto !important;position:static !important;height:auto !important}',
+        'body.is-premium #aria-dialog-overlay{display:none !important}',
+        // In case the text is shortened or veiled while the dialog is open.
+        'body.is-premium .article__text{max-height:none !important;overflow:visible !important;filter:none !important;-webkit-mask-image:none !important;mask-image:none !important}',
+        'body.is-premium .article__text p{display:block !important;visibility:visible !important;opacity:1 !important;filter:none !important}',
+      ].join(' ') + '"}]$2',
+    count: 1,
+  },
+];
+
+// sites.js with the site fixes applied (the tests compare against this).
+export function applySiteFixes(text) {
+  for (const fix of SITE_FIXES) text = patch(text, 'sites.js', fix).text;
+  return text;
+}
+
 // Appended to background.js: puts right a site list stored by an earlier
 // Safari build, then does the first-time setup when no install event arrived
 // (the extension was first loaded while Safari was starting).
@@ -312,6 +346,16 @@ export function build(options = {}) {
       fs.writeFileSync(file, res.text);
       applied.push({ patch: p.why, matches: res.matches });
     }
+
+    // Site rules that need a fix (see SITE_FIXES).
+    const sitesFile = path.join(args.out, 'sites.js');
+    let sitesText = fs.readFileSync(sitesFile, 'utf8');
+    for (const fix of SITE_FIXES) {
+      const res = patch(sitesText, 'sites.js', fix);
+      sitesText = res.text;
+      applied.push({ patch: fix.why, matches: res.matches, site: fix.site });
+    }
+    fs.writeFileSync(sitesFile, sitesText);
 
     // Popup: link to the Safari diagnostics page.
     const popupFile = path.join(args.out, 'options', 'popup.html');

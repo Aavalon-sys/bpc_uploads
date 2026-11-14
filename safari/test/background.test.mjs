@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
-import { asciiJs, build } from '../build.mjs';
+import { SITE_FIXES, applySiteFixes, asciiJs, build } from '../build.mjs';
 import { garble, readAsWindows1252, runBackground } from './harness.mjs';
 import { ACCEPTED_HEADER_NAMES, safariRuleProblems, uncompilable } from './webkit-rules.mjs';
 import { findMismatch } from './sampler.mjs';
@@ -90,7 +90,7 @@ test('Safari build: the patched background uses the compat layer', () => {
   assert.ok(!manifest.permissions.includes('offscreen'));
   assert.equal(manifest.incognito, undefined);
   assert.match(fs.readFileSync(path.join(safariDir, 'lib', 'purify.min.js'), 'utf8'), /DOMPurify \d/);
-  assert.equal(buildResult.info.patches.length, 10);
+  assert.equal(buildResult.info.patches.length, 11);
   assert.match(bg, /if \(details\.reason == "install"\) \{\r?\n\s*bpcSafari\.firstRun\(setDefaultOptions\);\r?\n\s*\} else if \(details\.reason == "update"\)/, 'install handler not patched');
   assert.ok(!bg.includes('ext_api.runtime.openOptionsPage()'));
   assert.match(bg, /setTimeout\(function \(\) \{\n  bpcSafari\.repairSiteNames\(defaultSites\)\.then\(function \(\) \{\n    bpcSafari\.firstRun\(setDefaultOptions\);\n  \}\);\n\}, 1500\);\n$/);
@@ -135,9 +135,12 @@ for (const version of [[16, 4], [17, 0], [18, 4], [26, 0]]) {
 
     // Every Chrome rule is present, except the ones Safari cannot express:
     // rules that only set response headers or only headers Safari refuses.
-    const chromeRules = new Map(chromeRun.sessionRules.map((r) => [r.id, r]));
+    // The rules of the sites the build fixes (SITE_FIXES) are tested on their own.
+    const fixedSite = (r) => SITE_FIXES.some((f) => (r.condition.initiatorDomains || r.condition.domains || []).includes(f.site));
+    const chromeRules = new Map(chromeRun.sessionRules.filter((r) => !fixedSite(r)).map((r) => [r.id, r]));
     const byBase = new Map();
     for (const rule of run.sessionRules) {
+      if (fixedSite(rule)) continue;
       const id = baseId(rule.id);
       assert.ok(chromeRules.has(id), `rule ${rule.id} has no Chrome counterpart`);
       if (!byBase.has(id)) byBase.set(id, []);
@@ -146,7 +149,7 @@ for (const version of [[16, 4], [17, 0], [18, 4], [26, 0]]) {
     const missing = [...chromeRules.values()].filter((r) => !byBase.has(r.id));
     assert.deepEqual(missing.filter((r) => !inexpressible(r)).map((r) => r.id), []);
     assert.deepEqual([...chromeRules.values()].filter((r) => inexpressible(r) && byBase.has(r.id)).map((r) => r.id), []);
-    const dropped = [...addCall.droppedRules]; // copy out of the VM realm
+    const dropped = [...addCall.droppedRules].filter((d) => !fixedSite(d.rule)); // copy out of the VM realm
     assert.deepEqual(dropped.map((d) => d.id).sort((a, b) => a - b), missing.map((r) => r.id).sort((a, b) => a - b));
     assert.ok(dropped.every((d) => /responseHeaders|only modifies request headers Safari refuses/.test(d.reason)), JSON.stringify(dropped.map((d) => d.reason)));
     // The Googlebot identity survives without the refused X-Forwarded-For header.
@@ -459,21 +462,26 @@ test('Safari build: every script is free of non-ASCII characters and still parse
   for (const rel of ['sites.js', 'cs_local/contentScript_en.js', 'cs_local/contentScript_fr.js', 'cs_local/contentScript_de.js']) {
     const original = fs.readFileSync(path.join(chromeDir, rel), 'utf8');
     assert.ok(!isAscii(original), `${rel} of the Chrome release is expected to have non-ASCII characters`);
-    assert.equal(fs.readFileSync(path.join(safariDir, rel), 'utf8'), asciiJs(original), rel);
+    const expected = rel === 'sites.js' ? applySiteFixes(original) : original;
+    assert.equal(fs.readFileSync(path.join(safariDir, rel), 'utf8'), asciiJs(expected), rel);
   }
 });
 
 // defaultSites as sites.js defines it, with the script read by the given function.
 function defaultSitesOf(dir, read) {
+  return defaultSitesIn(read(fs.readFileSync(path.join(dir, 'sites.js'))));
+}
+function defaultSitesIn(code) {
   const sandbox = { chrome: { runtime: { getManifest: () => ({ key: 'x' }) } } };
   vm.createContext(sandbox);
-  vm.runInContext(read(fs.readFileSync(path.join(dir, 'sites.js'))), sandbox);
+  vm.runInContext(code, sandbox);
   // Regular expressions by their escaped source, so that both spellings compare equal.
   return JSON.parse(JSON.stringify(sandbox.defaultSites, (key, value) => (Object.prototype.toString.call(value) === '[object RegExp]' ? `/${asciiJs(value.source)}/${value.flags}` : value)));
 }
 
 test('Safari build: sites.js read as Windows-1252 holds the sites of the Chrome release', () => {
-  const chromeSites = defaultSitesOf(chromeDir, (bytes) => bytes.toString('utf8'));
+  // (with the site fixes of the build)
+  const chromeSites = defaultSitesIn(applySiteFixes(fs.readFileSync(path.join(chromeDir, 'sites.js'), 'utf8')));
   const safariSites = defaultSitesOf(safariDir, readAsWindows1252);
   assert.deepEqual(Object.keys(safariSites), Object.keys(chromeSites));
   assert.deepEqual(safariSites, chromeSites);
@@ -622,4 +630,41 @@ test('Safari build: the page-world scripts start in a page without chrome and br
   assert.equal(world.sandbox.ext_chromium, true);
   assert.equal(messages.length, 1, 'the content script waits for the background message');
   assert.equal(world.timers.length, 0);
+});
+
+// --- Site fixes --------------------------------------------------------------
+// Rules the Safari build changes because the upstream rule no longer works
+// (SITE_FIXES in build.mjs).
+
+const HILL = 'https://thehill.com/the-120/6219817-musk-faces-democratic-oversight/';
+const BC_WALL = 'https://thehill.com/wp-content/plugins/lakana/inc/blueconic/scripts/login-registration-bc-wall.js?ver=1794521089';
+
+test('Safari build: The Hill Insider dialog is blocked, hidden and the page scrolls', async () => {
+  const fix = buildResult.info.patches.find((p) => p.site === 'thehill.com');
+  assert.ok(fix && fix.matches === 1, 'the The Hill fix was not applied');
+  const safariSites = defaultSitesOf(safariDir, readAsWindows1252);
+  const chromeSites = defaultSitesOf(chromeDir, (bytes) => bytes.toString('utf8'));
+  const hill = safariSites['The Hill'];
+  assert.equal(hill.domain, 'thehill.com');
+  assert.equal(hill.allow_cookies, chromeSites['The Hill'].allow_cookies);
+  // Every other site is as upstream has it.
+  for (const name of Object.keys(chromeSites)) if (name !== 'The Hill') assert.deepEqual(safariSites[name], chromeSites[name], name);
+  const css = hill.cs_code[0].add_style;
+  assert.match(css, /#login-registration-paywall\{display:none !important\}/);
+  assert.match(css, /body\.is-premium\{overflow:auto !important/);
+
+  const run = await runBackground({ extDir: safariDir, flavor: 'safari', safariVersion: [18, 4] });
+  assert.deepEqual(run.errors.map(String), []);
+  // The tinypass rule is still there, and the script that opens the dialog is blocked on thehill.com.
+  const blocks = run.sessionRules.filter((r) => r.action.type === 'block' && (r.condition.initiatorDomains || []).includes('thehill.com'));
+  const matches = (r, url) => (r.condition.regexFilter ? new RegExp(r.condition.regexFilter, 'i').test(url) : url.includes(r.condition.urlFilter.replace(/^\|\|/, '').replace(/\*/g, '')));
+  assert.ok(blocks.some((r) => matches(r, BC_WALL)), JSON.stringify(blocks.map((r) => r.condition)));
+  assert.ok(blocks.some((r) => matches(r, 'https://cdn.tinypass.com/api/tinypass.min.js')));
+  assert.ok(!blocks.some((r) => matches(r, 'https://thehill.com/wp-content/plugins/lakana/inc/blueconic/scripts/blueconic.js')), 'only the wall script is blocked');
+  // The content script on a The Hill article is sent the style.
+  pageLoaded(run, 12, HILL);
+  await run.settle(1200);
+  const sent = run.tabMessages.filter((m) => m.tabId === 12 && m.message.msg === 'bg2cs');
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].message.data.cs_code, [{ add_style: css }]);
 });

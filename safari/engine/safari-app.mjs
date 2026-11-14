@@ -152,6 +152,7 @@ const PAGE_PROBE = `
   out.styles = [...document.querySelectorAll('head > style[id]')].map((s) => s.id);
   out.paragraphs = [...document.querySelectorAll('p[data-n]')].filter((p) => p.offsetParent !== null).map((p) => Number(p.dataset.n));
   out.crawlerCopy = document.documentElement.getAttribute('data-bpc-safari-crawler');
+  out.overflow = [getComputedStyle(document.documentElement).overflowY, document.body ? getComputedStyle(document.body).overflowY : ''];
   out.world = { contentScript: typeof ext_chromium !== 'undefined', extChromium: typeof ext_chromium !== 'undefined' ? ext_chromium : null,
     csLocal: typeof cs_default === 'function', hasChrome: typeof chrome === 'object', hasBrowser: typeof browser === 'object' };
   return JSON.stringify(out);

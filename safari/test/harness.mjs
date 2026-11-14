@@ -60,6 +60,7 @@ export async function runBackground({
   const dnrCalls = [];
   const dnrErrors = [];
   const scriptCalls = [];
+  const tabMessages = []; // tabs.sendMessage(tabId, message): what content scripts are sent
   const sessionRules = new Map();
   const errors = [];
   const logs = [];
@@ -209,7 +210,10 @@ export async function runBackground({
       reload: () => Promise.resolve(),
       update: () => Promise.resolve(),
       create: () => Promise.resolve(),
-      sendMessage: () => Promise.resolve(),
+      sendMessage: (tabId, message) => {
+        tabMessages.push({ tabId, message: JSON.parse(JSON.stringify(message)) });
+        return Promise.resolve();
+      },
       executeScript: () => {},
     },
     windows: { onFocusChanged: makeEvent() },
@@ -338,6 +342,7 @@ export async function runBackground({
     dnrCalls,
     dnrErrors,
     scriptCalls,
+    tabMessages,
     // Without the marker rule the Safari build adds to verify its updates.
     sessionRules: [...sessionRules.values()].filter((r) => r.id !== MARKER_ID),
     optionsOpened,

@@ -192,11 +192,18 @@ function scenario(name, expect, { optional = false } = {}) {
       } else check(name, injected, `${label}: content script injected`);
       for (const probe of site.hidden || [])
         check(name, !!p.probes && !!p.probes[probe] && p.probes[probe].display === 'none', `${label}: content script hid the "${probe}" element (display=${p.probes && p.probes[probe] && p.probes[probe].display})`);
+      if (site.scrollable)
+        check(name, Array.isArray(p.overflow) && !p.overflow.includes('hidden'), `${label}: the page can be scrolled (overflow ${JSON.stringify(p.overflow)})`);
+      if (site.paragraphs)
+        check(name, (p.paragraphs || []).length === site.paragraphs, `${label}: all ${site.paragraphs} paragraphs are shown (${(p.paragraphs || []).length})`);
     } else {
       // Unsupported site, or the extension has no access: nothing may change.
       check(name, !!doc && !GOOGLEBOT.test(doc.userAgent || '') && !/google|drudge/.test(doc.referer || ''), `${label}: request headers untouched`);
       check(name, !injected && !(p.world && p.world.contentScript), `${label}: no content script`);
       if (site.article) check(name, !copies.length && JSON.stringify(p.paragraphs) === JSON.stringify(Array.from({ length: site.article.free }, (_, i) => i + 1)), `${label}: the page is as the site serves it (paragraphs ${JSON.stringify(p.paragraphs)}, ${copies.length} requests as crawler)`);
+      // The stand-in really does what the site does when the extension stays out of it.
+      if (site.scrollable)
+        check(name, Array.isArray(p.overflow) && p.overflow.includes('hidden') && !!p.probes && p.probes['paywall-modal'] && p.probes['paywall-modal'].display !== 'none', `${label}: the dialog covers the page and it does not scroll (overflow ${JSON.stringify(p.overflow)})`);
       if (!supported)
         check(name, Object.values(fetched).every(Boolean), `${label}: no script blocked`);
     }

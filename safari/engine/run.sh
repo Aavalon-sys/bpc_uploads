@@ -21,7 +21,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:-$ROOT/build/safari/engine}"
 EXT="$ROOT/build/safari/extension"
 HOSTS=(www.washingtonpost.com www.hola.com www.bpc-control.test)
-HSTS_HOSTS=(www.nbcnews.com www.nytimes.com www.ft.com www.wsj.com www.la-croix.com www.dallasnews.com www.ajc.com)
+HSTS_HOSTS=(www.nbcnews.com www.nytimes.com www.ft.com www.wsj.com www.la-croix.com www.dallasnews.com www.ajc.com thehill.com)
 CERT_NAME=bpc-engine-test
 HTTPS_PORT=18443
 PROXY_PORT=18080
@@ -156,7 +156,10 @@ run_scenario launch --safari-version "$SAFARI_VERSION" --load-delay 0 --grant al
 # The background page was unloaded for lack of events and a page load wakes it up.
 run_scenario idle --safari-version "$SAFARI_VERSION" --load-delay 6 --grant all --idle 40 "${FEW[@]}"
 # No website access was granted.
-run_scenario noaccess --safari-version "$SAFARI_VERSION" --load-delay 6 --grant none "${FEW[@]}"
+# (with the The Hill stand-in, to see that it does what the site does when the extension stays out)
+NOACCESS=("${FEW[@]}")
+if [ -n "$CERT_TRUSTED" ]; then NOACCESS+=(--url "https://thehill.com/test/article.html"); fi
+run_scenario noaccess --safari-version "$SAFARI_VERSION" --load-delay 6 --grant none "${NOACCESS[@]}"
 # A Private Browsing window (extensions are off there unless the user allows it).
 run_scenario private --safari-version "$SAFARI_VERSION" --load-delay 6 --grant all --private "${FEW[@]}"
 
