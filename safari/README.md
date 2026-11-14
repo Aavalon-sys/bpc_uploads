@@ -154,7 +154,7 @@ Safari 默认不允许扩展访问任何网站。没有授权的网站上，Safa
 | Chrome 版的 DOMPurify 是空实现 | 换成 Firefox 版发布包里的真实 DOMPurify |
 | Apple 的转换工具每次都生成版本 1.0 (1) 的 App | 用扩展的版本号和递增的构建号，新的 App 一定比旧的「新」 |
 
-以当前版本 4.4.9.3 为例：启用全部默认站点时，Chrome 版生成 728 条规则；Safari 版实际装上 1031 条（其中 204 条正则规则被改写拆分），外加 1 条用于检查的标记规则，跳过 30 条。
+以当前版本 4.4.9.4 为例：启用全部默认站点时，Chrome 版生成 728 条规则；Safari 版实际装上 1031 条（其中 204 条正则规则被改写拆分），外加 1 条用于检查的标记规则，跳过 30 条。
 
 ## 已知限制
 
@@ -173,8 +173,8 @@ Safari 默认不允许扩展访问任何网站。没有授权的网站上，Safa
 ## 验证清单（第一次安装后）
 
 1. 确认已按第 3 节授权网站访问
-2. 在一个支持的新闻网站上打开「Safari 诊断」，结论里应该是「扩展的脚本已注入到当前页面」，详细信息里 `session rules` 的 `total` 应该在 1000 左右（4.4.9.3 启用全部默认站点时是 1031）
-3. （macOS，可选）Safari 开发 菜单 → Web Extension Background Content → Bypass Paywalls Clean，打开后台页的 Web 检查器。控制台里应该能看到一行 `BPC Safari: 728 rules requested, 1031 applied (...)`（4.4.9.3 启用全部默认站点时的数字，随版本和启用的站点变化）；执行 `bpcSafari.report.lastAddCall.droppedRules` 可以查看具体跳过了哪些规则
+2. 在一个支持的新闻网站上打开「Safari 诊断」，结论里应该是「扩展的脚本已注入到当前页面」，详细信息里 `session rules` 的 `total` 应该在 1000 左右（4.4.9.4 启用全部默认站点时是 1031）
+3. （macOS，可选）Safari 开发 菜单 → Web Extension Background Content → Bypass Paywalls Clean，打开后台页的 Web 检查器。控制台里应该能看到一行 `BPC Safari: 728 rules requested, 1031 applied (...)`（4.4.9.4 启用全部默认站点时的数字，随版本和启用的站点变化）；执行 `bpcSafari.report.lastAddCall.droppedRules` 可以查看具体跳过了哪些规则
 
 ## 测试
 
