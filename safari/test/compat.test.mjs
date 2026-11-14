@@ -247,8 +247,8 @@ const flush = async () => { for (let i = 0; i < 12; i++) await new Promise((r) =
 
 // The compat layer with a browser in which navigations can be played out.
 function crawlerWorld({ stored = XFF_REFUSED, rules = [crawlerRule(1, 'example-news.com'), crawlerRule(2, 'other-news.com')] } = {}) {
-  const world = { timers: [], tabUpdates: [], dnrUpdates: [], tabStatus: 'loading', page: ARTICLE_PAGE, stored: structuredClone(stored) };
-  const listeners = { onBeforeNavigate: [], onCommitted: [], onCompleted: [], onRemoved: [] };
+  const world = { timers: [], tabUpdates: [], dnrUpdates: [], upgrades: [], tabStatus: 'loading', page: ARTICLE_PAGE, stored: structuredClone(stored) };
+  const listeners = { onBeforeNavigate: [], onCommitted: [], onCompleted: [], onRemoved: [], onMessage: [] };
   const sessionRules = new Map(rules.map((r) => [r.id, structuredClone(r)]));
   const event = (name) => ({ addListener: (fn) => listeners[name].push(fn) });
   const plain = (v) => JSON.parse(JSON.stringify(v));
@@ -259,7 +259,7 @@ function crawlerWorld({ stored = XFF_REFUSED, rules = [crawlerRule(1, 'example-n
     clearTimeout: (t) => { if (t) t.cleared = true; },
     addEventListener() {},
     browser: {
-      runtime: { id: 'x', getManifest: () => ({ name: 'Bypass Paywalls Clean', version: '1' }), onMessage: { addListener() {} } },
+      runtime: { id: 'x', getManifest: () => ({ name: 'Bypass Paywalls Clean', version: '1' }), onMessage: event('onMessage') },
       storage: {
         local: {
           set: (o) => { Object.assign(world.stored, plain(o)); return Promise.resolve(); },
@@ -281,7 +281,16 @@ function crawlerWorld({ stored = XFF_REFUSED, rules = [crawlerRule(1, 'example-n
         get: (id) => Promise.resolve({ id, status: world.tabStatus }),
         update: (id, properties) => { world.tabUpdates.push({ id, ...plain(properties) }); return Promise.resolve({ id }); },
       },
-      scripting: { executeScript: () => Promise.resolve([{ frameId: 0, result: world.page }]) },
+      scripting: {
+        executeScript: (details) => {
+          // The article upgrade (see "The article from the crawler's copy") or the look at the page.
+          if (details.func && details.func.name === 'crawlerUpgrade') {
+            world.upgrades.push({ tabId: details.target.tabId, ...plain(details.args[0]) });
+            return Promise.resolve([{ frameId: 0, result: null }]);
+          }
+          return Promise.resolve([{ frameId: 0, result: world.page }]);
+        },
+      },
     },
   };
   sandbox.globalThis = sandbox;
@@ -477,4 +486,85 @@ test('crawler: the diagnostics name the sites that get no crawler user agent', a
   assert.deepEqual([...info.crawlerRefusedBy], ['washingtonpost.com']);
   assert.equal(info.siteRefusesCrawler, true);
   assert.equal(world.bpcSafari._diagnostics('https://www.example-news.com/').siteRefusesCrawler, false);
+});
+
+// --- The article from the crawler's copy -------------------------------------
+// On a site that gets no crawler user agent, the page asks for itself again
+// with the crawler's two headers once it has loaded (crawlerUpgrade, which is
+// tested in a browser in crawler-upgrade.browser.test.mjs).
+
+const fullCrawlerRule = (id, domain, userAgent = GOOGLEBOT, address = '66.249.66.1') => {
+  const rule = crawlerRule(id, domain);
+  rule.action.requestHeaders[0].value = userAgent;
+  rule.action.requestHeaders.push({ header: 'X-Forwarded-For', operation: 'set', value: address });
+  return rule;
+};
+const WAPO = 'https://www.washingtonpost.com/opinions/2026/11/13/some-article/';
+
+test('crawler copy: asked for when the answer of a site without crawler user agent arrives', async () => {
+  const world = crawlerWorld({ rules: [] });
+  await world.fire('onBeforeNavigate', { tabId: 4, frameId: 0, url: WAPO });
+  assert.deepEqual(world.upgrades, [], 'not before there is a page');
+  await world.fire('onCommitted', { tabId: 4, frameId: 0, url: WAPO });
+  assert.deepEqual(world.upgrades, [{ tabId: 4, userAgent: GOOGLEBOT, forwardedFor: '66.249.66.1' }]);
+  await world.fire('onCompleted', { tabId: 4, frameId: 0, url: WAPO });
+  assert.equal(world.upgrades.length, 1, 'once per page');
+
+  // Not on other sites, not in frames, and not when Safari can send X-Forwarded-For itself.
+  await world.load(4, NEWS);
+  await world.fire('onCommitted', { tabId: 4, frameId: 2, url: WAPO });
+  await world.load(4, 'https://washingtonpost.com.example.org/');
+  assert.equal(world.upgrades.length, 1);
+  const capable = crawlerWorld({ stored: {}, rules: [] });
+  await capable.load(4, WAPO);
+  assert.deepEqual(capable.upgrades, []);
+});
+
+test('crawler copy: the request claims what the rule of the site claims', async () => {
+  const world = crawlerWorld({ rules: [] });
+  const mobile = 'Chrome/150.0.0.0 Mobile Safari/537.36 (compatible ; Googlebot/2.1 ; +http://www.google.com/bot.html)';
+  await world.bpcSafari.updateSessionRules({ addRules: [fullCrawlerRule(3, 'washingtonpost.com', mobile, '66.249.66.9'), fullCrawlerRule(1, 'example-news.com')] });
+  assert.deepEqual(world.headers(3), ['Referer'], 'the navigation itself claims nothing');
+  assert.deepEqual({ ...world.crawler.identity['washingtonpost.com'] }, { userAgent: mobile, forwardedFor: '66.249.66.9' });
+  await world.load(4, WAPO);
+  assert.deepEqual(world.upgrades, [{ tabId: 4, userAgent: mobile, forwardedFor: '66.249.66.9' }]);
+});
+
+test('crawler copy: a site found out during the visit gets it on the repeated load', async () => {
+  const world = crawlerWorld();
+  await world.fire('onBeforeNavigate', { tabId: 5, frameId: 0, url: NEWS });
+  await world.timeOut();
+  assert.deepEqual(world.upgrades, []);
+  await world.load(5, NEWS);
+  assert.deepEqual(world.upgrades, [{ tabId: 5, userAgent: GOOGLEBOT, forwardedFor: '66.249.66.1' }]);
+});
+
+test('crawler copy: what the page reports is kept, and two failures in a row stop the attempts', async () => {
+  const world = crawlerWorld({ rules: [] });
+  const report = (outcome) => world.fire('onMessage', { request: 'bpcSafariCrawlerUpgrade', data: { url: WAPO, outcome, status: 200, before: { paragraphs: 3, characters: 500 }, after: { paragraphs: 20, characters: 9000 }, article: 'div.meteredContent', by: 'text' } });
+  await world.load(4, WAPO);
+  await report('article replaced');
+  const notes = world.bpcSafari.report.crawler.map((n) => n.domain + ': ' + n.note);
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /^washingtonpost\.com: the crawler's copy: article replaced \{"status":200,.*"article":"div\.meteredContent","by":"text"\}$/);
+  assert.deepEqual([...world.bpcSafari._diagnostics(WAPO).crawlerNotes].map((n) => n.domain), ['washingtonpost.com']);
+
+  await world.load(4, WAPO);
+  await report('request failed: The operation was aborted.');
+  await world.load(4, WAPO);
+  assert.equal(world.upgrades.length, 3, 'one failure does not stop it');
+  await report('request failed: status 403');
+  await world.load(4, WAPO);
+  assert.equal(world.upgrades.length, 3, 'two failures in a row do');
+
+  // A page that was complete already is no failure.
+  const fine = crawlerWorld({ rules: [] });
+  for (let i = 0; i < 3; i++) {
+    await fine.load(4, WAPO);
+    await fine.fire('onMessage', { request: 'bpcSafariCrawlerUpgrade', data: { url: WAPO, outcome: 'no more text in the copy' } });
+  }
+  assert.equal(fine.upgrades.length, 3);
+  // Reports about other sites are ignored.
+  await fine.fire('onMessage', { request: 'bpcSafariCrawlerUpgrade', data: { url: 'https://elsewhere.example/', outcome: 'article replaced' } });
+  assert.equal(fine.bpcSafari.report.crawler.filter((n) => n.domain !== 'washingtonpost.com').length, 0);
 });

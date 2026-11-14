@@ -118,11 +118,24 @@ test('rules Safari cannot express are no cause for alarm, other refusals are', a
   assert.ok(alarmed.verdict.some((v) => v.startsWith('warn: ') && v.includes('Safari cannot compile this rule')), alarmed.verdict.join('\n'));
 });
 
-test('a site that refuses the Googlebot user agent is explained', async () => {
-  const refusing = { ...healthy, crawlerRefusedBy: ['washingtonpost.com', 'nytimes.com'], siteRefusesCrawler: true, crawlerNotes: [] };
-  const { verdict, report } = await runDiagnostics(api({ background: refusing }));
-  assert.ok(verdict.some((v) => v.startsWith('warn: ') && v.includes('Googlebot') && v.includes('页面可以正常打开')), verdict.join('\n'));
-  assert.match(report, /"crawlerRefusedBy":\["washingtonpost\.com","nytimes\.com"\]/);
+test('a site that refuses the Googlebot user agent is explained, with the result of the crawler copy', async () => {
+  const note = (text) => ({ at: '2026-11-13T20:00:00.000Z', domain: 'nytimes.com', note: "the crawler's copy: " + text });
+  const refusing = (notes) => ({ ...healthy, crawlerRefusedBy: ['washingtonpost.com', 'nytimes.com'], siteRefusesCrawler: true, crawlerNotes: notes });
+
+  const replaced = await runDiagnostics(api({ background: refusing([note('request failed: status 403 {}'), note('article replaced {"status":200}')]) }));
+  assert.deepEqual(replaced.verdict.filter((v) => !v.startsWith('ok: ')), []);
+  assert.ok(replaced.verdict.some((v) => v.includes('Googlebot') && v.includes('正文已替换成完整版本')), replaced.verdict.join('\n'));
+  assert.match(replaced.report, /"crawlerRefusedBy":\["washingtonpost\.com","nytimes\.com"\]/);
+
+  const failed = await runDiagnostics(api({ background: refusing([note('article replaced {}'), note('request failed: status 403 {}')]) }));
+  assert.ok(failed.verdict.some((v) => v.startsWith('warn: ') && v.includes('最近一次没有成功') && v.includes('status 403')), failed.verdict.join('\n'));
+
+  // Notes about other sites do not count, and a complete page is fine.
+  const none = await runDiagnostics(api({ background: refusing([{ at: 'x', domain: 'washingtonpost.com', note: "the crawler's copy: article replaced {}" }]) }));
+  assert.ok(none.verdict.some((v) => v.startsWith('warn: ') && v.includes('还没有结果')), none.verdict.join('\n'));
+  const complete = await runDiagnostics(api({ background: refusing([note('no more text in the copy {}')]) }));
+  assert.deepEqual(complete.verdict.filter((v) => !v.startsWith('ok: ')), []);
+
   const fine = await runDiagnostics(api({ background: { ...healthy, crawlerRefusedBy: ['washingtonpost.com'], siteRefusesCrawler: false } }));
   assert.deepEqual(fine.verdict.filter((v) => !v.startsWith('ok: ')), []);
 });

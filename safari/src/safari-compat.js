@@ -495,6 +495,7 @@
 
   // Returns {rules: [...], dropped: reason|null, expanded: bool}
   function adaptRule(rule) {
+    rememberCrawlerIdentity(rule);
     var r = clone(rule);
     var c = r.condition || (r.condition = {});
     var a = r.action || {};
@@ -705,6 +706,19 @@
     return !!entry && (!entry.until || entry.until > Date.now());
   }
 
+  // What a Googlebot rule of the extension claims to be, per site: the two
+  // headers as the extension wrote them, before Safari's refusals are applied.
+  var CRAWLER_IDENTITY = { userAgent: 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)', forwardedFor: '66.249.66.1' };
+  var crawlerIdentity = {}; // domain -> {userAgent, forwardedFor}
+  function rememberCrawlerIdentity(rule) {
+    var headers = rule && rule.action && rule.action.type === 'modifyHeaders' && rule.action.requestHeaders;
+    if (!headers) return;
+    var agent = headers.filter(isCrawlerHeader)[0];
+    var address = headers.filter(function (h) { return String(h && h.header).toLowerCase() === 'x-forwarded-for' && h.value; })[0];
+    var domain = ruleDomain(rule);
+    if (agent && address && domain) crawlerIdentity[domain] = { userAgent: String(agent.value), forwardedFor: String(address.value) };
+  }
+
   // Removes the refused headers from a modifyHeaders rule, in place, and with
   // X-Forwarded-For the User-Agent of a crawler for the sites that refuse it.
   // Returns the number of request headers left.
@@ -785,6 +799,8 @@
 
   // Sites found to refuse a crawler's User-Agent, and sites cleared of it.
   var CRAWLER_KEY = 'bpc_safari_crawler';
+  // What happened lately (see crawlerNote), kept for the diagnostics page.
+  var CRAWLER_NOTES_KEY = 'bpc_safari_crawler_notes';
   var DAY_MS = 24 * 3600 * 1000;
   // domain -> time: the site failed with and without the User-Agent, so the
   // User-Agent is not the reason; not examined again for a week.
@@ -793,8 +809,9 @@
   function loadRefused() {
     if (!refusedLoaded) {
       refusedLoaded = Promise.resolve().then(function () {
-        return api.storage.local.get([REFUSED_KEY, CRAWLER_KEY]);
+        return api.storage.local.get([REFUSED_KEY, CRAWLER_KEY, CRAWLER_NOTES_KEY]);
       }).then(function (items) {
+        if (items && Array.isArray(items[CRAWLER_NOTES_KEY])) report.crawler = items[CRAWLER_NOTES_KEY].concat(report.crawler).slice(-30);
         var crawler = (items && items[CRAWLER_KEY]) || {};
         var now = Date.now();
         Object.keys(crawler.refusedBy || {}).forEach(function (domain) {
@@ -1165,6 +1182,14 @@
     report.crawler.push({ at: new Date().toISOString(), domain: domain, note: text });
     if (report.crawler.length > 30) report.crawler.shift();
     console.info('BPC Safari: ' + domain + ': ' + text);
+    try {
+      var record = {};
+      record[CRAWLER_NOTES_KEY] = report.crawler.slice(-20);
+      var p = api.storage.local.set(record);
+      if (p && typeof p.catch === 'function') p.catch(function () {});
+    } catch (e) {
+      // diagnostics only
+    }
   }
 
   // The navigation got no answer, or a denial.
@@ -1260,7 +1285,10 @@
   }
 
   function onCommitted(details) {
-    var nav = details && details.frameId === 0 ? navigations[details.tabId] : null;
+    if (!details || details.frameId !== 0) return;
+    // The answer has arrived: on a site without crawler User-Agent, ask for the crawler's copy.
+    upgradeFromCrawler(details.tabId, details.url);
+    var nav = navigations[details.tabId];
     if (!nav) return;
     nav.committed = true;
     clearTimeout(nav.timer);
@@ -1272,6 +1300,308 @@
     nav.committed = nav.completed = true;
     clearTimeout(nav.timer);
     if (nav.domain) inspectPage(details.tabId, nav);
+  }
+
+  // --- The article from the crawler's copy ------------------------------------
+  //
+  // A site that refuses the crawler's User-Agent in a navigation serves the
+  // page it serves everybody: for washingtonpost.com, the free beginning of
+  // the article. Safari keeps X-Forwarded-For out of a navigation, but not out
+  // of a request a script makes: fetch() may set both that header and the
+  // User-Agent. So while such a page loads, the same address is fetched from
+  // inside the page with the crawler's two headers, which is the request
+  // Chrome makes for the navigation itself. When that copy has more running
+  // text, its article element takes the place of the page's. Nothing of the
+  // copy is executed, and when anything is unclear the page is left as it is.
+
+  // Runs in the page (in the extension's own world) and must not use anything
+  // from this file. It is started when the page's answer arrives, so that the
+  // copy is on its way while the page loads; the article is exchanged once the
+  // page has been parsed, and looked at again when it has loaded. Reports what
+  // it did to onCrawlerUpgrade below, and returns a promise of that report.
+  function crawlerUpgrade(config) {
+    if (window.top !== window || window.__bpcSafariCrawler) return null;
+    window.__bpcSafariCrawler = true;
+    var api = (typeof browser === 'object' && browser) || (typeof chrome === 'object' && chrome) || null;
+    var placed = null; // the exchange in place: {el, fresh, selector, keeper}
+
+    function textOf(el) {
+      return (el.textContent || '').replace(/\s+/g, ' ').trim();
+    }
+    // The paragraphs of running text: long enough, and not page furniture.
+    function paragraphsIn(doc) {
+      var found = [];
+      var all = doc.querySelectorAll('p');
+      for (var i = 0; i < all.length; i++) {
+        if (all[i].closest('nav, footer, aside, form, figure, button, [role="dialog"], [data-bpc-safari-crawler="article"]')) continue;
+        var text = textOf(all[i]);
+        if (text.length >= 80) found.push({ el: all[i], text: text });
+      }
+      return found;
+    }
+    function lengthOf(list) {
+      var n = 0;
+      list.forEach(function (p) { n += p.text.length; });
+      return n;
+    }
+    function depthOf(el) {
+      var depth = 0;
+      while (el.parentElement) {
+        el = el.parentElement;
+        depth++;
+      }
+      return depth;
+    }
+    function describe(el) {
+      return el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (el.classList.length ? '.' + el.classList[0] : '');
+    }
+    // The element that holds the article: the deepest one with most of the running text.
+    function articleOf(list) {
+      var total = lengthOf(list);
+      var scores = new Map();
+      list.forEach(function (p) {
+        for (var el = p.el.parentElement; el; el = el.parentElement) scores.set(el, (scores.get(el) || 0) + p.text.length);
+      });
+      var best = null;
+      var bestDepth = -1;
+      scores.forEach(function (score, el) {
+        var depth = score >= 0.7 * total ? depthOf(el) : -1;
+        if (depth > bestDepth) {
+          best = el;
+          bestDepth = depth;
+        }
+      });
+      return best;
+    }
+    // A selector for an element by its tag, id and class names; the tag alone
+    // for the two elements a page has once.
+    function selectorOf(el) {
+      var tag = el.tagName.toLowerCase();
+      if (!el.id && !el.classList.length) return tag === 'article' || tag === 'main' ? tag : '';
+      return tag + (el.id ? '#' + CSS.escape(el.id) : '') +
+        Array.prototype.map.call(el.classList, function (name) { return '.' + CSS.escape(name); }).join('');
+    }
+    function onlyMatch(selector, there) {
+      if (!selector) return null;
+      var here = document.querySelectorAll(selector + ':not([data-bpc-safari-crawler="article"])');
+      return here.length === 1 && there.querySelectorAll(selector).length === 1 && here[0] !== document.body && here[0] !== document.documentElement ? here[0] : null;
+    }
+    // The same element in the page, and the element of the copy to put there:
+    //  - through a paragraph both have, the same number of steps up;
+    //  - or by the article element's tag, id and class names;
+    //  - or, failing both, the nearest element around the article that can be
+    //    found by name in both: more of the page is exchanged then.
+    function counterpartOf(article, list) {
+      var copy = article.ownerDocument;
+      var shown = paragraphsIn(document);
+      for (var i = 0, tried = 0; i < list.length && tried < 12; i++) {
+        if (!article.contains(list[i].el)) continue;
+        tried++;
+        for (var k = 0; k < shown.length; k++) {
+          if (shown[k].text !== list[i].text) continue;
+          var theirs = list[i].el;
+          var ours = shown[k].el;
+          while (theirs !== article && ours) {
+            theirs = theirs.parentElement;
+            ours = ours.parentElement;
+          }
+          if (ours && ours !== document.body && ours !== document.documentElement && ours.tagName === article.tagName && ours.className === article.className) return { el: ours, from: article, by: 'text' };
+        }
+      }
+      for (var el = article, by = 'name'; el && el !== copy.body && el !== copy.documentElement; el = el.parentElement, by = 'surroundings') {
+        var match = onlyMatch(selectorOf(el), copy);
+        if (match) return { el: match, from: el, by: by };
+      }
+      return null;
+    }
+    // A copy of the article for this document, with nothing in it that runs.
+    function harmlessCopy(article) {
+      var fresh = document.importNode(article, true);
+      Array.prototype.forEach.call(fresh.querySelectorAll('script, template, link, meta, base, object, embed'), function (el) { el.remove(); });
+      Array.prototype.forEach.call(fresh.querySelectorAll('*'), function (el) {
+        for (var i = el.attributes.length - 1; i >= 0; i--) {
+          var name = el.attributes[i].name;
+          if (/^on/i.test(name) || (/^(href|src|action|formaction|xlink:href)$/i.test(name) && /^\s*javascript:/i.test(el.attributes[i].value))) el.removeAttribute(name);
+        }
+      });
+      // Pictures the page's scripts would have filled in.
+      Array.prototype.forEach.call(fresh.querySelectorAll('img'), function (img) {
+        var src = img.getAttribute('src');
+        var lazy = img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('data-original');
+        if ((!src || /^data:/.test(src)) && lazy) img.setAttribute('src', lazy);
+        if (!img.getAttribute('srcset') && img.getAttribute('data-srcset')) img.setAttribute('srcset', img.getAttribute('data-srcset'));
+      });
+      fresh.setAttribute('data-bpc-safari-crawler', 'article');
+      return fresh;
+    }
+
+    function mark(value) {
+      if (document.documentElement) document.documentElement.setAttribute('data-bpc-safari-crawler', value);
+    }
+    function report(note, outcome) {
+      note.outcome = outcome;
+      mark(outcome === 'article replaced' ? 'replaced' : 'unchanged');
+      try {
+        var sent = api && api.runtime && api.runtime.sendMessage({ request: 'bpcSafariCrawlerUpgrade', data: note });
+        if (sent && typeof sent.catch === 'function') sent.catch(function () {});
+      } catch (e) {
+        // nobody to tell
+      }
+      return note;
+    }
+
+    // The page's own element is hidden, not removed: its scripts may still hold
+    // on to it. For half a minute, see that they do not undo the exchange.
+    function keep() {
+      if (!placed) return;
+      var el = placed.el;
+      if (!el.isConnected && placed.selector) {
+        var again = document.querySelectorAll(placed.selector + ':not([data-bpc-safari-crawler="article"])');
+        if (again.length === 1) el = placed.el = again[0];
+      }
+      if (!el.isConnected) return;
+      if (el.style.display !== 'none') el.style.setProperty('display', 'none', 'important');
+      if (placed.fresh.previousElementSibling !== el) el.parentNode.insertBefore(placed.fresh, el.nextSibling);
+    }
+    function undo() {
+      if (!placed) return;
+      clearInterval(placed.keeper);
+      placed.fresh.remove();
+      if (placed.el.isConnected) placed.el.style.removeProperty('display');
+      placed = null;
+    }
+
+    // Puts the article of the copy into the page. Returns what came of it.
+    function exchange(html, note) {
+      var copy = new DOMParser().parseFromString(html, 'text/html');
+      var before = paragraphsIn(document);
+      var after = paragraphsIn(copy);
+      note.before = { paragraphs: before.length, characters: lengthOf(before) };
+      note.after = { paragraphs: after.length, characters: lengthOf(after) };
+      if (note.after.characters < note.before.characters + 500 || note.after.characters < 1.3 * note.before.characters) return 'no more text in the copy';
+      var article = articleOf(after);
+      if (!article || article === copy.body || article === copy.documentElement) return 'no article element in the copy';
+      note.article = describe(article);
+      var target = counterpartOf(article, after);
+      if (!target) return 'article element not found in the page';
+      note.by = target.by;
+      if (target.from !== article) note.exchanged = describe(target.from);
+      var checks = 0;
+      placed = { el: target.el, fresh: harmlessCopy(target.from), selector: selectorOf(target.el) };
+      keep();
+      placed.keeper = setInterval(function () {
+        keep();
+        if (++checks >= 60 && placed) clearInterval(placed.keeper);
+      }, 500);
+      return 'article replaced';
+    }
+
+    function copyOf(url) {
+      var controller = typeof AbortController === 'function' ? new AbortController() : null;
+      var timer = setTimeout(function () { if (controller) controller.abort(); }, config.timeout || 15000);
+      return fetch(url, {
+        headers: { 'User-Agent': config.userAgent, 'X-Forwarded-For': config.forwardedFor, Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+        cache: 'no-store',
+        credentials: 'include',
+        signal: controller ? controller.signal : undefined,
+      }).then(function (response) {
+        if (!response.ok) throw new Error('status ' + response.status);
+        var charset = /charset=["']?([\w-]+)/i.exec(response.headers.get('content-type') || '');
+        return response.arrayBuffer().then(function (buffer) {
+          clearTimeout(timer);
+          try {
+            return new TextDecoder(charset ? charset[1] : 'utf-8').decode(buffer);
+          } catch (e) {
+            return new TextDecoder('utf-8').decode(buffer);
+          }
+        });
+      }).catch(function (e) {
+        clearTimeout(timer);
+        throw e;
+      });
+    }
+
+    // One article: fetch the copy, exchange when the page is parsed, and look
+    // once more when it has loaded if that did not work.
+    function run() {
+      var url = location.href;
+      var note = { url: url };
+      mark('fetching');
+      return copyOf(url).then(function (html) {
+        note.bytes = html.length;
+        return new Promise(function (resolve) {
+          function settle(last) {
+            if (location.href !== url) return resolve(null); // the page moved on
+            var outcome = exchange(html, note);
+            if (outcome === 'article replaced' || last || document.readyState === 'complete') return resolve(report(note, outcome));
+            window.addEventListener('load', function () { setTimeout(function () { settle(true); }, 300); }, { once: true });
+            return undefined;
+          }
+          if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { settle(false); }, { once: true });
+          else settle(false);
+        });
+      }, function (e) {
+        return report(note, 'request failed: ' + (e && e.message || e));
+      });
+    }
+
+    // A page may show another article without loading a new document: take
+    // the exchange back and start over for the new address.
+    var address = location.pathname + location.search;
+    setInterval(function () {
+      var now = location.pathname + location.search;
+      if (now === address) return;
+      address = now;
+      undo();
+      setTimeout(run, 1200);
+    }, 1000);
+
+    return run();
+  }
+
+  // Where the copy did not help twice in a row, it is not asked for again
+  // until the background page starts anew.
+  var crawlerUpgradeFailures = {}; // domain -> number of failures in a row
+
+  // The site without a crawler User-Agent that `url` belongs to, or ''.
+  function refusedDomainFor(url) {
+    var host = hostOf(url);
+    if (!host || !refusedHeaders['x-forwarded-for']) return '';
+    var domains = Object.keys(crawlerRefusedBy).filter(crawlerRefused);
+    for (var k = 0; k < domains.length; k++)
+      if (onSite(host, domains[k])) return domains[k];
+    return '';
+  }
+
+  function upgradeFromCrawler(tabId, url) {
+    return loadRefused().then(function () {
+      var domain = refusedDomainFor(url);
+      if (!domain || crawlerUpgradeFailures[domain] >= 2) return undefined;
+      // Only where the extension is at work: the site is enabled in its options.
+      if (typeof isSiteEnabled === 'function' && !isSiteEnabled({ url: url })) return undefined;
+      var identity = crawlerIdentity[domain] || CRAWLER_IDENTITY;
+      return api.scripting.executeScript({ target: { tabId: tabId }, func: crawlerUpgrade, args: [{ userAgent: identity.userAgent, forwardedFor: identity.forwardedFor }] });
+    }).catch(function (e) {
+      recordError('article from the crawler\'s copy: ' + (e && e.message || e));
+    });
+  }
+
+  // What crawlerUpgrade did in a page.
+  function onCrawlerUpgrade(data) {
+    var domain = refusedDomainFor(data && data.url);
+    if (!domain) return;
+    var replaced = data.outcome === 'article replaced';
+    var unchanged = data.outcome === 'no more text in the copy';
+    if (replaced || unchanged) crawlerUpgradeFailures[domain] = 0;
+    else crawlerUpgradeFailures[domain] = (crawlerUpgradeFailures[domain] || 0) + 1;
+    crawlerNote(domain, 'the crawler\'s copy: ' + data.outcome + ' ' + JSON.stringify({ status: data.status, bytes: data.bytes, before: data.before, after: data.after, article: data.article, by: data.by }));
+  }
+
+  if (api && api.runtime && api.runtime.onMessage) {
+    api.runtime.onMessage.addListener(function (message) {
+      if (message && message.request === 'bpcSafariCrawlerUpgrade') onCrawlerUpgrade(message.data);
+      return undefined;
+    });
   }
 
   if (api && api.webNavigation && api.webNavigation.onBeforeNavigate && api.webNavigation.onCommitted && api.webNavigation.onCompleted) {
@@ -1473,7 +1803,7 @@
     openOptionsPage: openOptionsPage,
     report: report,
     // exposed for tests
-    _crawler: { refusedBy: crawlerRefusedBy, cleared: crawlerCleared, fine: crawlerFine, navigations: navigations, looksDenied: looksDenied, ruleDomain: ruleDomain, STALL_MS: STALL_MS },
+    _crawler: { refusedBy: crawlerRefusedBy, cleared: crawlerCleared, fine: crawlerFine, navigations: navigations, looksDenied: looksDenied, ruleDomain: ruleDomain, STALL_MS: STALL_MS, identity: crawlerIdentity, upgrade: crawlerUpgrade, upgradeFailures: crawlerUpgradeFailures },
     _diagnostics: diagnostics,
     _isMarker: isMarker,
     _MARKER_ID: MARKER_ID,

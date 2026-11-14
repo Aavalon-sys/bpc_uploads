@@ -150,6 +150,8 @@ const PAGE_PROBE = `
   for (const a of document.documentElement.attributes) if (a.name.startsWith('data-ran-')) out.ran[a.name.slice(9)] = a.value;
   for (const e of document.querySelectorAll('[data-probe]')) out.probes[e.getAttribute('data-probe')] = { display: getComputedStyle(e).display, text: e.textContent.trim().slice(0, 60) };
   out.styles = [...document.querySelectorAll('head > style[id]')].map((s) => s.id);
+  out.paragraphs = [...document.querySelectorAll('p[data-n]')].filter((p) => p.offsetParent !== null).map((p) => Number(p.dataset.n));
+  out.crawlerCopy = document.documentElement.getAttribute('data-bpc-safari-crawler');
   out.world = { contentScript: typeof ext_chromium !== 'undefined', extChromium: typeof ext_chromium !== 'undefined' ? ext_chromium : null,
     csLocal: typeof cs_default === 'function', hasChrome: typeof chrome === 'object', hasBrowser: typeof browser === 'object' };
   return JSON.stringify(out);

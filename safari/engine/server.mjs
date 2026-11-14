@@ -32,11 +32,14 @@ export const SITES = {
   // claims to be Googlebot but does not come from Google's address (Safari
   // cannot send the X-Forwarded-For header that makes it look as if it did).
   'www.washingtonpost.com': {
-    rule: 'known to refuse a fake Googlebot: Google referer + blocked script, no Googlebot user agent',
+    rule: 'known to refuse a fake Googlebot: Google referer + blocked script, no Googlebot user agent; the article comes from the crawler\'s copy',
     scripts: { ok: '/ok.js?n=ok', tetro: '/x/tetro-client/a.js?n=tetro' },
     blocked: ['tetro'],
     refusesCrawler: 'stall',
     crawler: 'never sent',
+    // Everybody gets the first two paragraphs; Google's crawler, which is a
+    // request with its user agent and its address, gets all nine.
+    article: { free: 2, all: 9 },
   },
   'www.dallasnews.com': {
     rule: 'never answers a fake Googlebot: the extension finds out and loads the page without the user agent',
@@ -93,14 +96,26 @@ export const SITES = {
   },
 };
 
-function page(host) {
+// An article the way washingtonpost.com lays it out: one wrapper per paragraph,
+// and after the article what the page shows to everybody.
+function article(site, whole) {
+  const count = whole ? site.article.all : site.article.free;
+  const paragraphs = Array.from({ length: count }, (_, i) => `<div class="article-body" data-qa="article-body"><p data-n="${i + 1}">Paragraph ${i + 1} of the article says something long enough to count as running text, and then a little more to be safe.</p></div>`).join('\n');
+  return `<div class="meteredContent grid-center">
+${paragraphs}
+</div>
+<section class="readers"><h2>What readers are saying</h2><p>The conversation explores the subject of the article. Participants share memories and experiences, and some comments reflect on it.</p></section>`;
+}
+
+function page(host, crawler = false) {
   const site = SITES[host] || { scripts: { ok: '/ok.js?n=ok' } };
   const scripts = Object.values(site.scripts).map((src) => `<script src="${src}"></script>`).join('\n');
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Engine test: ${host}</title>
 ${scripts}
 </head><body>
-<article><h1>Engine test page</h1><p data-probe="content">Article text for ${host}.</p></article>
+<article><h1>Engine test page</h1><p data-probe="content">Article text for ${host}.</p>
+${site.article ? article(site, crawler) : ''}</article>
 ${site.body || ''}
 <script>document.documentElement.setAttribute('data-ran-inline', '1');</script>
 </body></html>
@@ -164,7 +179,8 @@ function handler(scheme, logFile, proxyPort) {
       'cache-control': 'no-store',
       'set-cookie': 'bpc_engine=1; Path=/; Max-Age=3600',
     });
-    res.end(page(host));
+    // Google's crawler, as far as a server can tell: its user agent from its address.
+    res.end(page(host, /Googlebot/i.test(req.headers['user-agent'] || '') && req.headers['x-forwarded-for'] === '66.249.66.1'));
   };
 }
 

@@ -102,8 +102,17 @@
         if (bg.backgroundLoaded === false) say('bad', '后台脚本没有完整加载（background.js 未运行）。');
         if (bg.errors && bg.errors.length) say('warn', '后台页有 ' + bg.errors.length + ' 个报错，见下方 background.errors。');
         if (siteHost && bg.siteEnabled === false) say('warn', '当前网站不在已启用的站点里（不受支持，或在 Options 里没有勾选）。');
-        // Safari cannot send the address of Google's crawler along with its user agent.
-        if (bg.siteRefusesCrawler) say('warn', '这个网站会拒绝“自称 Googlebot、却不是从 Google 的地址发出”的请求，而 Safari 不允许扩展伪造来源地址，所以扩展没有对它伪装成 Googlebot。页面可以正常打开，其余措施（屏蔽脚本、Referer、内容脚本）照常生效，但这个网站的付费墙不一定能绕过。');
+        // Safari cannot send the address of Google's crawler along with its user agent in a navigation.
+        if (bg.siteRefusesCrawler) {
+          var copyNotes = (bg.crawlerNotes || []).filter(function (n) {
+            return n && /crawler's copy/.test(n.note) && (siteHost === n.domain || siteHost.slice(-n.domain.length - 1) === '.' + n.domain);
+          });
+          var lastCopy = copyNotes.length ? copyNotes[copyNotes.length - 1].note : '';
+          var why = '这个网站会拒绝“自称 Googlebot、却不是从 Google 的地址发出”的页面请求，而 Safari 不允许扩展在打开页面时伪造来源地址。所以扩展改为在页面加载完之后，以 Googlebot 的身份另取一份，把完整的正文换进页面。';
+          if (/article replaced/.test(lastCopy)) say('ok', why + '最近一次：正文已替换成完整版本。');
+          else if (/no more text/.test(lastCopy)) say('ok', why + '最近一次：页面本来就是完整的，没有改动。');
+          else say('warn', why + (lastCopy ? '最近一次没有成功：' + lastCopy : '这一页还没有结果（刷新页面后再打开诊断）。'));
+        }
         // Rules Safari cannot express are left out on purpose (see README); anything else is unexpected.
         var expected = ['responseHeaders not supported by Safari', 'only modifies request headers Safari refuses'];
         var dropped = (bg.lastAddCall && bg.lastAddCall.dropped) || {};
