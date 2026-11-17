@@ -87,6 +87,38 @@ export const SITES = {
     hidden: ['ad'],
     body: '<div data-gam="banner" data-probe="ad">ADVERT (the content script hides this)</div>',
   },
+  // The Hill Insider (2026): the whole article is in the page, and a dialog
+  // that the site opens over it stops the page from scrolling.
+  'thehill.com': {
+    rule: 'Hill Insider dialog over the full article: its script is blocked, the dialog hidden and the page scrolls again',
+    scripts: { ok: '/ok.js?n=ok', bcwall: '/wp-content/plugins/lakana/inc/blueconic/scripts/login-registration-bc-wall.js?n=bcwall' },
+    blocked: ['bcwall'],
+    bodyClass: 'single single-post is-premium the-hill',
+    hidden: ['paywall-modal'],
+    scrollable: true,
+    paragraphs: 12,
+    body: `<style>
+  html.lr-modal-open { overflow: hidden; height: 100%; }
+  .login-registration-modal { position: fixed; inset: 0; z-index: 1000; background: rgba(0, 0, 0, .8); display: flex; }
+  .login-registration-modal[hidden] { display: none; }
+  #aria-dialog-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, .5); display: none; }
+  #aria-dialog-overlay.is-visible { display: block; }
+</style>
+<div class="article__text | body-copy | flow">
+${Array.from({ length: 12 }, (_, i) => `<p data-n="${i + 1}">Paragraph ${i + 1} of the article says something long enough to count as running text, and then a little more to be safe.</p>`).join('\n')}
+</div>
+<div id="aria-dialog-overlay"></div>
+<div class="lr-login-wrapper"><div id="login-registration-paywall" class="login-registration-modal" data-probe="paywall-modal" hidden><h3>Continue with The Hill Insider</h3></div></div>
+<script>
+  // What the site's login-registration plugin does on an Insider article.
+  setTimeout(function () {
+    document.getElementById('login-registration-paywall').removeAttribute('hidden');
+    document.getElementById('aria-dialog-overlay').classList.add('is-visible');
+    document.documentElement.classList.add('lr-modal-open');
+    document.body.style.overflow = 'hidden';
+  }, 300);
+</script>`,
+  },
   // Not a supported site: the extension must leave it alone.
   'www.bpc-control.test': {
     rule: 'control (unsupported site)',
@@ -113,7 +145,7 @@ function page(host, crawler = false) {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Engine test: ${host}</title>
 ${scripts}
-</head><body>
+</head><body${site.bodyClass ? ` class="${site.bodyClass}"` : ''}>
 <article><h1>Engine test page</h1><p data-probe="content">Article text for ${host}.</p>
 ${site.article ? article(site, crawler) : ''}</article>
 ${site.body || ''}

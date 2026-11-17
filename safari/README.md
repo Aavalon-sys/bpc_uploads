@@ -151,10 +151,11 @@ Safari 默认不允许扩展访问任何网站。没有授权的网站上，Safa
 | 去掉 `X-Forwarded-For` 之后，伪装 Googlebot 的请求「自称 Googlebot、却不是从 Google 的地址发出」，有的网站对这种请求干脆不回应，页面永远打不开（washingtonpost.com 就是这样） | 打开页面时不再对这类网站伪装成 Googlebot，规则的其余部分照常生效。已知的网站预先列出；其他网站在访问时自动发现：页面 12 秒没有任何回应、或者打开的是一个「拒绝访问」的短页面时，去掉伪装再加载一次，成功了就记住这个网站 |
 | 不伪装的话，这类网站只给文章的免费开头（服务器端就截断了） | Safari 只是不让在**打开页面**的请求里加 `X-Forwarded-For`，脚本自己发的请求可以同时带上它和 Googlebot 的 User-Agent。所以页面一开始加载，就由页面带着这两个请求头把同一个网址再取一次，如果取回的版本正文明显更多，就把其中的文章部分换进页面（见下方「已知限制」） |
 | Safari 不支持修改响应头（`responseHeaders`） | 跳过这类规则（见下方「已知限制」） |
+| 上游规则已失效的个别网站 | 构建时修正这些网站的规则（`build.mjs` 里的 `SITE_FIXES`）。目前只有 The Hill：2026 年推出的 Hill Insider 付费墙其实是盖在完整正文上的弹窗，扩展屏蔽打开弹窗的脚本、隐藏弹窗并恢复页面滚动。同样的修正也做成了 Chrome 版（`chrome/build.mjs`，CI 产物 `chrome-extension-fixed`） |
 | Chrome 版的 DOMPurify 是空实现 | 换成 Firefox 版发布包里的真实 DOMPurify |
 | Apple 的转换工具每次都生成版本 1.0 (1) 的 App | 用扩展的版本号和递增的构建号，新的 App 一定比旧的「新」 |
 
-以当前版本 4.4.9.4 为例：启用全部默认站点时，Chrome 版生成 728 条规则；Safari 版实际装上 1031 条（其中 204 条正则规则被改写拆分），外加 1 条用于检查的标记规则，跳过 30 条。
+以当前版本 4.4.9.5 为例：启用全部默认站点时，Chrome 版生成 728 条规则；Safari 版实际装上 1032 条（其中 204 条正则规则被改写拆分），外加 1 条用于检查的标记规则，跳过 30 条。
 
 ## 已知限制
 
@@ -173,8 +174,8 @@ Safari 默认不允许扩展访问任何网站。没有授权的网站上，Safa
 ## 验证清单（第一次安装后）
 
 1. 确认已按第 3 节授权网站访问
-2. 在一个支持的新闻网站上打开「Safari 诊断」，结论里应该是「扩展的脚本已注入到当前页面」，详细信息里 `session rules` 的 `total` 应该在 1000 左右（4.4.9.4 启用全部默认站点时是 1031）
-3. （macOS，可选）Safari 开发 菜单 → Web Extension Background Content → Bypass Paywalls Clean，打开后台页的 Web 检查器。控制台里应该能看到一行 `BPC Safari: 728 rules requested, 1031 applied (...)`（4.4.9.4 启用全部默认站点时的数字，随版本和启用的站点变化）；执行 `bpcSafari.report.lastAddCall.droppedRules` 可以查看具体跳过了哪些规则
+2. 在一个支持的新闻网站上打开「Safari 诊断」，结论里应该是「扩展的脚本已注入到当前页面」，详细信息里 `session rules` 的 `total` 应该在 1000 左右（4.4.9.5 启用全部默认站点时是 1032）
+3. （macOS，可选）Safari 开发 菜单 → Web Extension Background Content → Bypass Paywalls Clean，打开后台页的 Web 检查器。控制台里应该能看到一行 `BPC Safari: 728 rules requested, 1032 applied (...)`（4.4.9.5 启用全部默认站点时的数字，随版本和启用的站点变化）；执行 `bpcSafari.report.lastAddCall.droppedRules` 可以查看具体跳过了哪些规则
 
 ## 测试
 
