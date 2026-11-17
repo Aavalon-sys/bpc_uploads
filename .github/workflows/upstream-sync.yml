@@ -2,19 +2,23 @@ name: Upstream sync
 
 # Looks twice a day for a new release in upstream's bpc_uploads. When there is
 # one, its release files become a commit on the branch "upstream-sync"; the
-# Safari build is made from that commit and tested (the Node tests, then the
-# WebKit engine and Safari app tests); and only when everything passes does the
-# commit go to main, where the "Safari extension" workflow builds the packages
-# and publishes them as a release. When something fails, main stays as it is
-# and an issue says so.
+# Safari build is made from that commit and tested (the Node tests and, where
+# switched on, the WebKit engine and Safari app tests); and only when
+# everything passes does the commit go to main, where the "Safari extension"
+# workflow builds the packages and publishes them as a release. When something
+# fails, main stays as it is and an issue says so.
 #
 # The jobs that run upstream's code (the tests) can only read the repository.
 # The jobs that can write to it run this repository's own scripts, and take
 # nothing from upstream but release files (tools/sync-upstream.mjs).
 #
-# Set the repository variable UPSTREAM_SYNC_ENGINE_TEST to "off" to accept a
-# release on the Node tests alone: the engine test takes about ten minutes on a
-# macOS runner, which count tenfold in a private repository.
+# What it costs (a private repository pays for Actions by the minute, each job
+# rounded up, macOS tenfold): a check that finds nothing new is one job of
+# under a minute. A new release is about five minutes on Linux and one on
+# macOS (the packaging). The WebKit engine and Safari app tests are ten more
+# minutes on macOS, so they only run when the repository variable
+# UPSTREAM_SYNC_ENGINE_TEST is "on"; without it a release is accepted on the
+# Node tests.
 
 on:
   schedule:
@@ -69,7 +73,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write # pushes the candidate branch
-      issues: read
+      issues: write # closes the issue about an earlier failure
     outputs:
       changed: ${{ steps.sync.outputs.changed }}
       proceed: ${{ steps.candidate.outputs.proceed }}
@@ -98,6 +102,18 @@ jobs:
           MESSAGE_FILE: ${{ runner.temp }}/message.txt
           PUSH_URL: https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git
         run: bash tools/ci/candidate.sh
+      # Nothing new: an earlier failure is over (in this job, to keep such a run to one job).
+      - name: Close the issue about an earlier failure
+        if: steps.sync.outputs.changed == 'false' && !inputs.rehearsal
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CHANGED: 'false'
+          PROCEED: ''
+          PROMOTE: skipped
+          VERSION: ${{ steps.sync.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash tools/ci/report.sh
 
   test:
     name: Build and test the candidate
@@ -138,7 +154,7 @@ jobs:
   engine:
     name: Engine test of the candidate
     needs: [check, test]
-    if: needs.check.outputs.proceed == 'true' && vars.UPSTREAM_SYNC_ENGINE_TEST != 'off'
+    if: needs.check.outputs.proceed == 'true' && vars.UPSTREAM_SYNC_ENGINE_TEST == 'on'
     permissions:
       contents: read
     uses: ./.github/workflows/safari-engine.yml
@@ -150,7 +166,7 @@ jobs:
     needs: [check, test, engine]
     if: >-
       always() && needs.check.outputs.proceed == 'true' && needs.test.result == 'success' &&
-      (needs.engine.result == 'success' || (needs.engine.result == 'skipped' && vars.UPSTREAM_SYNC_ENGINE_TEST == 'off'))
+      (needs.engine.result == 'success' || (needs.engine.result == 'skipped' && vars.UPSTREAM_SYNC_ENGINE_TEST != 'on'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -178,7 +194,7 @@ jobs:
   report:
     name: Open or close the issue about the sync
     needs: [check, test, engine, promote]
-    if: always() && needs.check.result == 'success'
+    if: always() && needs.check.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

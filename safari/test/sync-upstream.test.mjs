@@ -364,6 +364,10 @@ test('workflow steps: the issue about a failed sync is opened, updated and close
   res = step('report.sh', tmp, { ...env, ...none, CHANGED: 'false', PROCEED: '' }, [{ number: 7 }, { number: 9 }]);
   assert.equal(res.status, 0, res.text);
   assert.deepEqual(res.gh.slice(1).map((c) => c.args.slice(0, 3).join(' ')), ['issue close 7', 'issue close 9']);
+  // (as the first job calls it, with nothing about an attempt)
+  res = step('report.sh', tmp, { CHANGED: 'false', PROMOTE: 'skipped', VERSION: '3.0.1', RUN_URL: env.RUN_URL }, [{ number: 7 }]);
+  assert.equal(res.status, 0, res.text);
+  assert.deepEqual(res.gh.slice(1).map((c) => c.args.slice(0, 3).join(' ')), ['issue close 7']);
   // The release was accepted: the same.
   res = step('report.sh', tmp, { ...env, CHANGED: 'true', PROCEED: 'true', TEST: 'success', ENGINE: 'success', PROMOTE: 'success' }, [{ number: 7 }]);
   assert.equal(res.status, 0, res.text);

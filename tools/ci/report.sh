@@ -5,14 +5,19 @@
 #
 # Environment:
 #   CHANGED            "true" when upstream had a release that main has not
-#   PROCEED            "true" when this run tried to accept it
-#   TEST, ENGINE, PROMOTE   the results of those jobs
-#   VERSION, UPSTREAM, BASE, SHA   what was tried
-#   FAILURES           lines of the test job about what failed (may be empty)
+#   VERSION            upstream's version
 #   RUN_URL            the page of this run
+# and when this run tried to accept the release:
+#   PROCEED            "true"
+#   TEST, ENGINE, PROMOTE   the results of those jobs
+#   UPSTREAM, BASE, SHA     what was tried
+#   FAILURES           lines of the test job about what failed (may be empty)
 #   CANDIDATE_BRANCH, ISSUE_LABEL, GITHUB_REPOSITORY_OWNER, RUNNER_TEMP,
 #   and for gh: GH_TOKEN, GH_REPO
 set -euo pipefail
+
+# The first job calls this with the first few of these only, when upstream has nothing new.
+: "${PROCEED:=}" "${TEST:=}" "${ENGINE:=}" "${PROMOTE:=}" "${UPSTREAM:=}" "${BASE:=}" "${SHA:=}" "${FAILURES:=}"
 
 open=$(gh issue list --state open --label "$ISSUE_LABEL" --json number --jq '.[].number')
 
@@ -38,7 +43,7 @@ body="$RUNNER_TEMP/upstream-sync-issue.md"
   echo
   echo "- 运行记录：$RUN_URL"
   echo "- 候选提交：\`${SHA:0:7}\`，在分支 \`$CANDIDATE_BRANCH\` 上"
-  if [ -n "${FAILURES:-}" ]; then
+  if [ -n "$FAILURES" ]; then
     # Text from the test run: shown as it is, never as markup or a mention.
     echo
     echo '```text'

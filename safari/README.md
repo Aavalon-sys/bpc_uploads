@@ -212,7 +212,7 @@ node --test --test-concurrency=1 safari/test/*.test.mjs
 safari/engine/run.sh
 ```
 
-GitHub Actions 的「Safari engine test」工作流在每次改动后自动运行它（以及下一节的 Safari 应用测试）。这个测试用 WebKit 公开的 `WKWebExtension` 接口（Safari 的扩展功能就建在它上面）加载构建好的扩展，然后打开几个受支持网站的本地替身页面，检查真正发生了什么：
+GitHub Actions 的「Safari engine test」工作流在每个 Pull Request 上自动运行它（以及下一节的 Safari 应用测试），也可以在 Actions 页面手动运行。这个测试用 WebKit 公开的 `WKWebExtension` 接口（Safari 的扩展功能就建在它上面）加载构建好的扩展，然后打开几个受支持网站的本地替身页面，检查真正发生了什么：
 
 - 服务器实际收到的请求头（Googlebot 的 User-Agent、Google 的 Referer、被清空的 Cookie）；
 - 应该被屏蔽的脚本确实没有被请求，对照脚本照常加载；
@@ -252,7 +252,7 @@ WebDriver 只能看到网页，看不到扩展内部，所以这里检查的都�
 
 1. 把上游的发布文件做成一个提交，推到 `upstream-sync` 分支（候选提交）；
 2. 用候选提交构建 Safari 版并运行全部 Node 测试；
-3. 在 macOS 上运行真实 WebKit 引擎和 Safari 应用的测试；
+3. （默认关闭，见下方「Actions 用量」）在 macOS 上运行真实 WebKit 引擎和 Safari 应用的测试；
 4. 全部通过后，把候选提交推到 `main`，再由「Safari extension」工作流打包并发布到 Releases。
 
 任何一步失败，`main` 都不会被改动，工作流会开一个带 `upstream-sync` 标签的 issue，写明失败的步骤和运行记录。最常见的原因是上游改了代码，`safari/build.mjs` 里的某个补丁对不上了；改好补丁并合入 `main` 之后，下一次定时运行会自动重试，成功后 issue 自动关闭。同一个上游版本在同一个 `main` 上失败过一次，定时运行就不会再试（避免每天白跑两次），手动运行不受这个限制。
@@ -260,7 +260,11 @@ WebDriver 只能看到网页，看不到扩展内部，所以这里检查的都�
 其他说明：
 
 - **手动运行**：Actions 页面 → Upstream sync → Run workflow。勾选 rehearsal 时，即使上游没有新版本，也会用一个空提交把所有步骤走一遍，用来检查工作流本身。
-- **Actions 用量**：私有仓库里 macOS 运行器的时间按 10 倍计费。没有新版本时，每次检查不到 1 分钟（Linux）；有新版本时，引擎测试约 10 分钟、打包约 1 分钟（都是 macOS）。想省掉引擎测试，可以在仓库的 Settings → Secrets and variables → Actions → Variables 里把 `UPSTREAM_SYNC_ENGINE_TEST` 设为 `off`，这样只要 Node 测试通过就接受新版本。
+- **Actions 用量**：私有仓库的 Actions 按分钟计费（每个任务向上取整到分钟，macOS 运行器按 10 倍算），GitHub Free 每月有 2000 分钟的免费额度（Pro 是 3000 分钟），用完后所有工作流都不会启动，直到下个周期重置或者在 GitHub 的 Billing 设置里提高支出上限。各项的用量大约是：
+  - 没有新版本的一次检查：1 分钟（Linux），每天两次，一个月约 60 分钟；
+  - 同步一个新版本并打包：Linux 约 8 分钟，加 macOS 打包 1 分钟（计 10 分钟）；
+  - 引擎测试：macOS 约 10 分钟（计 100 分钟）。所以自动同步默认不跑它，只要 Node 测试通过就接受新版本。想让自动同步也跑引擎测试，在仓库的 Settings → Secrets and variables → Actions → Variables 里把 `UPSTREAM_SYNC_ENGINE_TEST` 设为 `on`；
+  - 出于同样的原因，引擎测试只在 Pull Request 上运行（合并之后不再重复跑一遍），只改文档的提交不触发任何构建和测试。
 - **权限**：运行上游代码的任务（各项测试）对仓库只有只读权限；有写权限的任务只运行本仓库自己的脚本，并且在推到 `main` 之前会再检查一遍候选提交里只有发布文件。
 
 ### 手动同步

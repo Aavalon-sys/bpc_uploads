@@ -6,20 +6,19 @@ name: Safari engine test
 #    is built on, where the test can also look inside the extension;
 #  - in the Safari app itself, driven by safaridriver.
 
+# It takes about ten minutes on a macOS runner, which a private repository pays
+# for tenfold. So it runs for pull requests, where a change is tested before
+# it is merged, and not a second time for the merge itself; and not for a
+# change to documentation alone.
+
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'safari/**'
-      - 'bypass-paywalls-chrome-clean-master.zip'
-      - 'bypass-paywalls-firefox-clean-master.zip'
-      - '.github/workflows/safari-engine.yml'
   pull_request:
     paths:
       - 'safari/**'
       - 'bypass-paywalls-chrome-clean-master.zip'
       - 'bypass-paywalls-firefox-clean-master.zip'
       - '.github/workflows/safari-engine.yml'
+      - '!**/*.md'
   workflow_dispatch:
   # From the upstream sync, for the commit it is about to accept.
   workflow_call:

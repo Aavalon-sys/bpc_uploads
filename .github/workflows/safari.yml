@@ -13,6 +13,7 @@ on:
       - 'chrome/**'
       - 'tools/**'
       - '.github/workflows/safari.yml'
+      - '!**/*.md'
   pull_request:
     paths:
       - 'safari/**'
@@ -22,6 +23,7 @@ on:
       - 'chrome/**'
       - 'tools/**'
       - '.github/workflows/safari.yml'
+      - '!**/*.md'
   workflow_dispatch:
 
 permissions:
