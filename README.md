@@ -13,4 +13,6 @@ Firefox: [https://gitflic.ru/project/magnolia1234/bypass-paywalls-firefox-clean#
 
 Safari (built from the Chrome release in this repository): [safari/README.md](safari/README.md)
 
-Chrome with this repository's site fixes (currently The Hill): built by [chrome/build.mjs](chrome/build.mjs), download `chrome-extension-fixed` from the "Safari extension" workflow run; install it like the upstream zip (Load unpacked).
+Chrome with this repository's site fixes (currently The Hill): built by [chrome/build.mjs](chrome/build.mjs); install it like the upstream zip (Load unpacked).
+
+The packages of every build of `main` (Safari for macOS and iOS, and the Chrome zip with the site fixes) are on the Releases page. New upstream releases are synced, tested and published automatically, see [safari/README.md](safari/README.md).

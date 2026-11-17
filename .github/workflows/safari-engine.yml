@@ -21,12 +21,19 @@ on:
       - 'bypass-paywalls-firefox-clean-master.zip'
       - '.github/workflows/safari-engine.yml'
   workflow_dispatch:
+  # From the upstream sync, for the commit it is about to accept.
+  workflow_call:
+    inputs:
+      ref:
+        description: The commit to test
+        type: string
+        required: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: safari-engine-${{ github.ref }}
+  group: safari-engine-${{ inputs.ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -40,6 +47,9 @@ jobs:
         os: [macos-15]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
       - name: System
         run: |
           sw_vers
