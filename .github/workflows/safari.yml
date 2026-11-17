@@ -10,6 +10,7 @@ on:
       - '!safari/engine/**'
       - 'bypass-paywalls-chrome-clean-master.zip'
       - 'bypass-paywalls-firefox-clean-master.zip'
+      - 'chrome/**'
       - '.github/workflows/safari.yml'
   pull_request:
     paths:
@@ -17,6 +18,7 @@ on:
       - '!safari/engine/**'
       - 'bypass-paywalls-chrome-clean-master.zip'
       - 'bypass-paywalls-firefox-clean-master.zip'
+      - 'chrome/**'
       - '.github/workflows/safari.yml'
   workflow_dispatch:
 
@@ -55,6 +57,14 @@ jobs:
         with:
           name: safari-extension
           path: build/safari/bypass-paywalls-clean-safari-*.zip
+          if-no-files-found: error
+      - name: Build Chrome release with the site fixes
+        run: node chrome/build.mjs
+      - name: Upload Chrome release with the site fixes
+        uses: actions/upload-artifact@v4
+        with:
+          name: chrome-extension-fixed
+          path: build/chrome/bypass-paywalls-chrome-clean-*-fixed.zip
           if-no-files-found: error
 
   xcode:
