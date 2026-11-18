@@ -11,7 +11,9 @@ on:
       - 'bypass-paywalls-chrome-clean-master.zip'
       - 'bypass-paywalls-firefox-clean-master.zip'
       - 'chrome/**'
+      - 'tools/**'
       - '.github/workflows/safari.yml'
+      - '!**/*.md'
   pull_request:
     paths:
       - 'safari/**'
@@ -19,7 +21,9 @@ on:
       - 'bypass-paywalls-chrome-clean-master.zip'
       - 'bypass-paywalls-firefox-clean-master.zip'
       - 'chrome/**'
+      - 'tools/**'
       - '.github/workflows/safari.yml'
+      - '!**/*.md'
   workflow_dispatch:
 
 permissions:
@@ -40,6 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       build-number: ${{ steps.build.outputs.number }}
+      version: ${{ steps.build.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -50,6 +55,7 @@ jobs:
         run: |
           node safari/build.mjs --zip
           echo "number=$(node -p 'require("./build/safari/extension/safari-build.json").build.number')" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p 'require("./build/safari/extension/safari-build.json").version')" >> "$GITHUB_OUTPUT"
       - name: Run tests
         run: node --test --test-concurrency=1 safari/test/*.test.mjs
       - name: Upload extension folder
@@ -65,6 +71,17 @@ jobs:
         with:
           name: chrome-extension-fixed
           path: build/chrome/bypass-paywalls-chrome-clean-*-fixed.zip
+          if-no-files-found: error
+      - name: Write the release notes
+        run: |
+          mkdir -p build/release
+          node tools/release-notes.mjs --repo "$GITHUB_REPOSITORY" > build/release/release-notes.md
+          cat build/release/release-notes.md
+      - name: Upload the release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: build/release/release-notes.md
           if-no-files-found: error
 
   xcode:
@@ -135,3 +152,44 @@ jobs:
           name: safari-xcode-project
           path: dist/Bypass-Paywalls-Clean-Xcode-project.zip
           if-no-files-found: error
+
+  # On main, the packages of every build are published as a release, so that
+  # the newest ones are always at the same address (Releases, "Latest").
+  # Nothing of the repository is checked out or run here: the job only has the
+  # files the jobs above made.
+  release:
+    name: Publish the packages as a release
+    needs: [test, xcode]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.test.outputs.version }}
+          BUILD: ${{ needs.test.outputs.build-number }}
+        run: |
+          ls -l dist
+          [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+){0,3}$ ]] || { echo "::error::unexpected version: $VERSION"; exit 1; }
+          [[ "$BUILD" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]] || { echo "::error::unexpected build number: $BUILD"; exit 1; }
+          files=(
+            dist/Bypass-Paywalls-Clean-macOS.zip
+            dist/Bypass-Paywalls-Clean-unsigned.ipa
+            "dist/bypass-paywalls-chrome-clean-$VERSION-fixed.zip"
+            "dist/bypass-paywalls-clean-safari-$VERSION.zip"
+            dist/Bypass-Paywalls-Clean-Xcode-project.zip
+          )
+          for file in "${files[@]}"; do test -s "$file"; done
+          gh release create "v$VERSION-$BUILD" "${files[@]}" \
+            --target "$GITHUB_SHA" \
+            --title "$VERSION（构建 $BUILD）" \
+            --notes-file dist/release-notes.md \
+            --latest

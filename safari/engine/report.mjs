@@ -10,6 +10,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
 import { SITES } from './server.mjs';
 
 const dir = process.argv[2];
@@ -53,6 +55,21 @@ function readRequests(file) {
 const failures = [];
 // Sites stored per scenario: the same list whichever way the extension was first started.
 const storedSites = {};
+// The built-in site names of the build that was tested. Sites the extension
+// fetched from upstream's online lists (sites_updated, custom sites) arrive or
+// not depending on network timing, so the scenarios are compared on these.
+const defaultSiteNames = (() => {
+  try {
+    const file = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'build', 'safari', 'extension', 'sites.js');
+    const sandbox = { chrome: { runtime: { getManifest: () => ({ key: 'x' }) } } };
+    vm.createContext(sandbox);
+    vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox);
+    return new Set(Object.keys(sandbox.defaultSites));
+  } catch (e) {
+    return null;
+  }
+})();
+const onlineSites = {};
 const check = (scenario, ok, message) => {
   console.log(`   ${ok ? 'ok  ' : 'FAIL'} ${message}`);
   if (!ok) failures.push(`${scenario}: ${message}`);
@@ -240,7 +257,11 @@ function scenario(name, expect, { optional = false } = {}) {
     const accented = names.filter((n) => /[^\x00-\x7f]/.test(n.toLowerCase().replace(/\s\(.*\)/, '')));
     const garbled = names.filter((n) => /Ã[^\x00-\x7f]/.test(n));
     check(name, accented.length >= 30 && !garbled.length, `site names with accented letters are stored intact (${accented.length} stored, ${garbled.length} garbled${garbled.length ? ': ' + garbled.slice(0, 3).join(', ') : ''})`);
-    storedSites[name] = bg.storedSites;
+    if (defaultSiteNames && names.length) {
+      storedSites[name] = names.filter((n) => defaultSiteNames.has(n)).length;
+      const extra = names.filter((n) => !defaultSiteNames.has(n));
+      if (extra.length) onlineSites[name] = extra;
+    } else storedSites[name] = bg.storedSites;
   }
 }
 
@@ -267,7 +288,8 @@ if (appRun) {
 
   console.log('\n=== All scenarios ===');
   const counts = [...new Set(Object.values(storedSites))];
-  check('all', counts.length === 1, `every scenario stored the same number of sites (${JSON.stringify(storedSites)})`);
+  check('all', counts.length === 1, `every scenario stored the same number of ${defaultSiteNames ? 'built-in ' : ''}sites (${JSON.stringify(storedSites)})`);
+  if (Object.keys(onlineSites).length) console.log(`        also stored, from upstream's online site lists: ${JSON.stringify(onlineSites)}`);
 }
 
 console.log(`\n=== ${failures.length ? failures.length + ' check(s) failed' : 'all checks passed'} ===`);

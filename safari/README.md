@@ -49,16 +49,19 @@ open build/safari/xcode/*/*.xcodeproj
 
 最后到 Safari → 设置 → 扩展，勾选 Bypass Paywalls Clean。
 
-### 方式 C：下载 CI 打包好的 macOS 应用
+### 方式 C：下载打包好的 macOS 应用
 
-GitHub Actions 的「Safari extension」工作流会上传以下产物（在仓库的 Actions 页面打开某次运行，在页面底部的 Artifacts 里下载，保留 90 天）：
+`main` 分支每次构建出的安装包都会发布到仓库的 **Releases** 页面，标着「Latest」的就是最新的一份（上游有新版本时会自动同步并发布，见下方「同步上游新版本」）：
 
-- `safari-macos-app`：ad-hoc 签名的 `Bypass Paywalls Clean.app`
-- `safari-ios-ipa-unsigned`：未签名的 iOS/iPadOS 安装包（`.ipa`），用法见下方「iOS / iPadOS」
-- `safari-xcode-project`：生成好的 Xcode 工程（macOS + iOS）
-- `safari-extension`：扩展目录的 zip
+- `Bypass-Paywalls-Clean-macOS.zip`：ad-hoc 签名的 `Bypass Paywalls Clean.app`
+- `Bypass-Paywalls-Clean-unsigned.ipa`：未签名的 iOS/iPadOS 安装包，用法见下方「iOS / iPadOS」
+- `bypass-paywalls-chrome-clean-<版本>-fixed.zip`：带本仓库网站修正的 Chrome 版
+- `bypass-paywalls-clean-safari-<版本>.zip`：扩展目录的 zip
+- `Bypass-Paywalls-Clean-Xcode-project.zip`：生成好的 Xcode 工程（macOS + iOS）
 
-下载并解压 `safari-macos-app` 后，执行：
+还没合入 `main` 的改动（Pull Request）不会发布到 Releases，它们的安装包在 Actions 页面对应那次「Safari extension」运行底部的 Artifacts 里（`safari-macos-app`、`safari-ios-ipa-unsigned` 等，保留 90 天）。
+
+下载并解压 `Bypass-Paywalls-Clean-macOS.zip` 后，执行：
 
 ```bash
 xattr -dr com.apple.quarantine "Bypass Paywalls Clean.app"
@@ -72,7 +75,7 @@ iOS 只能安装签过名的 App，所以下面两种方式都要用你自己的
 
 **用 CI 生成的 ipa（不需要 Mac）**
 
-1. 从 GitHub Actions 下载 `safari-ios-ipa-unsigned`，解压得到 `Bypass-Paywalls-Clean-unsigned.ipa`（未签名）
+1. 从 Releases 页面下载 `Bypass-Paywalls-Clean-unsigned.ipa`（未签名）
 2. 用 [Sideloadly](https://sideloadly.io/)（Windows/macOS）或 AltStore / SideStore 安装：选这个 ipa，登录你的 Apple ID，工具会签名并装到设备上。**不要选「移除 App 扩展」**：扩展就是 Safari 插件本身；AltStore 问是否保留扩展时选保留
 3. iOS 16 及以上需先打开 设置 → 隐私与安全性 → 开发者模式
 4. 7 天后签名过期，重新用工具安装一遍（Sideloadly 和 AltStore 都支持续签）
@@ -81,7 +84,7 @@ iOS 只能安装签过名的 App，所以下面两种方式都要用你自己的
 
 **用 Xcode**
 
-用 Xcode 打开 `safari-xcode-project`（或方式 B 生成的工程），选择「(iOS)」scheme，选你的设备和 Apple ID 账号，点 Run。
+用 Xcode 打开 `Bypass-Paywalls-Clean-Xcode-project.zip` 里的工程（或方式 B 生成的工程），选择「(iOS)」scheme，选你的设备和 Apple ID 账号，点 Run。
 
 装好后先打开一次 App，再到 设置 → App → Safari → 扩展 里启用 Bypass Paywalls Clean，并把「所有网站」设为允许。
 
@@ -155,7 +158,7 @@ Safari 默认不允许扩展访问任何网站。没有授权的网站上，Safa
 | Chrome 版的 DOMPurify 是空实现 | 换成 Firefox 版发布包里的真实 DOMPurify |
 | Apple 的转换工具每次都生成版本 1.0 (1) 的 App | 用扩展的版本号和递增的构建号，新的 App 一定比旧的「新」 |
 
-以当前版本 4.4.9.5 为例：启用全部默认站点时，Chrome 版生成 728 条规则；Safari 版实际装上 1032 条（其中 204 条正则规则被改写拆分），外加 1 条用于检查的标记规则，跳过 30 条。
+以 4.4.9.5 为例：启用全部默认站点时，Chrome 版生成 728 条规则；Safari 版实际装上 1032 条（其中 204 条正则规则被改写拆分），外加 1 条用于检查的标记规则，跳过 30 条。
 
 ## 已知限制
 
@@ -166,7 +169,7 @@ Safari 默认不允许扩展访问任何网站。没有授权的网站上，Safa
   - 这样换进去的正文是**静态内容**：文字和图片都在，但文章里依赖脚本的互动部件不会工作，正文可能比页面其余部分稍晚出现。替换靠的是比较两个版本的正文：先找双方都有的段落，找不到就按元素的名字，再不行就换掉文章外面更大的一块（那一块里的互动部件也会失效）；全都对不上时页面保持原样（只有开头），诊断页会写明原因；
   - nationalgeographic.com 那条只设置 `X-Forwarded-For` 的规则被整条跳过。
 - **不能发送 App 请求头**：haaretz.com、haaretz.co.il、themarker.com 和 New York Post（nypost.djservices.io）的规则依赖手机 App 的自定义请求头，这一部分在 Safari 上不生效。
-- **不会自动更新扩展本身**：上游发布新版后，需要更新仓库里的发布包并重新构建。弹窗里的「有新版本」提示链接的是 Chrome 版下载页。如果在选项里开启了在线更新站点规则，站点规则仍会从 gitflic 更新。
+- **装好的扩展不会自己更新**：上游发布新版后，仓库会自动同步并把新的安装包发布到 Releases（见下方「同步上游新版本」），但装到设备上这一步仍然要手动做（见「更新到新的构建」）。弹窗里的「有新版本」提示链接的是 Chrome 版下载页。如果在选项里开启了在线更新站点规则，站点规则仍会从 gitflic 更新。
 - Safari 18 以前，扩展无法读取或删除 HttpOnly Cookie。
 - 无痕浏览模式下，Safari 只支持 spanning 模式（Chrome 版用的是 split），并且需要在 Safari 扩展设置里单独允许无痕浏览。
 - Safari 每次启动后要重新装载规则，启动后最初一两秒内打开的页面可能还没有规则。
@@ -198,6 +201,8 @@ node --test --test-concurrency=1 safari/test/*.test.mjs
 - 旧版本留下的站点列表（乱码的名称、被停用的站点）会被修正，用户自己精简过的列表保持不变；
 - 注入网页环境的脚本在没有 `chrome` 对象的页面里能正常启动；
 - 诊断页在「没有网站权限」「一切正常」「后台没有响应」等情况下给出正确的结论。
+- 上游同步（`sync-upstream.test.mjs`，用临时的 git 仓库模拟上游和 GitHub 上的仓库）：只拿发布文件，上游里的工作流、脚本、符号链接都进不来；不像发布包的上游会被拒绝；「Upstream sync」工作流的各个步骤照实际的方式运行，包括候选提交里混进了别的文件、或者 `main` 在测试期间变了时拒绝推送，以及 issue 的开、更新和关闭；
+- Chrome 修正版和上游原版相比只改了 `sites.js` 和版本名（`chrome-build.test.mjs`）。
 
 `safari/test/webkit-rules.mjs` 是根据 Apple 文档、MDN 兼容性数据、WebKit 源码和引擎测试的结果整理出的**近似**模型，故意定得偏严。真实 Safari 运行时会用自己的 `isRegexSupported()` 再判断一次。
 
@@ -207,7 +212,7 @@ node --test --test-concurrency=1 safari/test/*.test.mjs
 safari/engine/run.sh
 ```
 
-GitHub Actions 的「Safari engine test」工作流在每次改动后自动运行它（以及下一节的 Safari 应用测试）。这个测试用 WebKit 公开的 `WKWebExtension` 接口（Safari 的扩展功能就建在它上面）加载构建好的扩展，然后打开几个受支持网站的本地替身页面，检查真正发生了什么：
+GitHub Actions 的「Safari engine test」工作流在每个 Pull Request 上自动运行它（以及下一节的 Safari 应用测试），也可以在 Actions 页面手动运行。这个测试用 WebKit 公开的 `WKWebExtension` 接口（Safari 的扩展功能就建在它上面）加载构建好的扩展，然后打开几个受支持网站的本地替身页面，检查真正发生了什么：
 
 - 服务器实际收到的请求头（Googlebot 的 User-Agent、Google 的 Referer、被清空的 Cookie）；
 - 应该被屏蔽的脚本确实没有被请求，对照脚本照常加载；
@@ -237,21 +242,46 @@ WebDriver 只能看到网页，看不到扩展内部，所以这里检查的都�
 
 ## 同步上游新版本
 
-**注意**：Safari 相关文件合入 `main` 之后，不要再用 `git push --mirror` 从 gitflic 同步，否则 GitHub 上的这些提交会被覆盖掉。改用下面的方式：
+上游每次发布都会把整个仓库的历史改写成一个「Release latest」提交，所以没法用 `git merge` 合并，只能把上游的发布文件（根目录下的 `*.crx`、`*.xpi`、`*.zip` 和 `release-hashes.txt`）作为一个普通提交拿过来。`tools/sync-upstream.mjs` 做的就是这件事，并且**只**拿这些文件：上游的 README、目录和其他任何文件都不会进入本仓库。
+
+**注意**：不要用 `git push --mirror` 从 gitflic 同步，否则 GitHub 上 Safari 相关的提交会被覆盖掉。
+
+### 自动同步
+
+「Upstream sync」工作流（`.github/workflows/upstream-sync.yml`）每天检查两次（UTC 04:23 和 16:23，即北京时间 12:23 和 00:23），上游有新版本时：
+
+1. 把上游的发布文件做成一个提交，推到 `upstream-sync` 分支（候选提交）；
+2. 用候选提交构建 Safari 版并运行全部 Node 测试；
+3. （默认关闭，见下方「Actions 用量」）在 macOS 上运行真实 WebKit 引擎和 Safari 应用的测试；
+4. 全部通过后，把候选提交推到 `main`，再由「Safari extension」工作流打包并发布到 Releases。
+
+任何一步失败，`main` 都不会被改动，工作流会开一个带 `upstream-sync` 标签的 issue，写明失败的步骤和运行记录。最常见的原因是上游改了代码，`safari/build.mjs` 里的某个补丁对不上了；改好补丁并合入 `main` 之后，下一次定时运行会自动重试，成功后 issue 自动关闭。同一个上游版本在同一个 `main` 上失败过一次，定时运行就不会再试（避免每天白跑两次），手动运行不受这个限制。
+
+其他说明：
+
+- **手动运行**：Actions 页面 → Upstream sync → Run workflow。勾选 rehearsal 时，即使上游没有新版本，也会用一个空提交把所有步骤走一遍，用来检查工作流本身。
+- **Actions 用量**：私有仓库的 Actions 按分钟计费（每个任务向上取整到分钟，macOS 运行器按 10 倍算），GitHub Free 每月有 2000 分钟的免费额度（Pro 是 3000 分钟），用完后所有工作流都不会启动，直到下个周期重置或者在 GitHub 的 Billing 设置里提高支出上限。各项的用量大约是：
+  - 没有新版本的一次检查：1 分钟（Linux），每天两次，一个月约 60 分钟；
+  - 同步一个新版本并打包：Linux 约 8 分钟，加 macOS 打包 1 分钟（计 10 分钟）；
+  - 引擎测试：macOS 约 10 分钟（计 100 分钟）。所以自动同步默认不跑它，只要 Node 测试通过就接受新版本。想让自动同步也跑引擎测试，在仓库的 Settings → Secrets and variables → Actions → Variables 里把 `UPSTREAM_SYNC_ENGINE_TEST` 设为 `on`；
+  - 出于同样的原因，引擎测试只在 Pull Request 上运行（合并之后不再重复跑一遍），只改文档的提交不触发任何构建和测试。
+- **权限**：运行上游代码的任务（各项测试）对仓库只有只读权限；有写权限的任务只运行本仓库自己的脚本，并且在推到 `main` 之前会再检查一遍候选提交里只有发布文件。
+
+### 手动同步
 
 ```bash
-git remote add upstream https://gitflic.ru/project/magnolia1234/bpc_uploads.git
+node tools/sync-upstream.mjs --message /tmp/sync-message.txt
 ```
 
 ```bash
-git fetch upstream main
+node safari/build.mjs && node --test --test-concurrency=1 safari/test/*.test.mjs
 ```
 
 ```bash
-git merge upstream/main
+git commit -F /tmp/sync-message.txt
 ```
 
-合并后重新运行 `node safari/build.mjs` 和测试。如果构建报「patch expected … but found …」，说明上游代码结构变了，需要相应更新 `safari/build.mjs` 里的补丁。
+第一条命令把上游的发布文件放进工作区并暂存（加 `--check` 则只比较、不改动）。如果构建报「patch expected … but found …」，说明上游代码结构变了，需要相应更新 `safari/build.mjs` 里的补丁。
 
 ## 文件说明
 
@@ -261,3 +291,6 @@ git merge upstream/main
 - `xcode/convert.sh`、`xcode/set-version.mjs`、`xcode/build-app.sh`、`xcode/make-ipa.sh`：生成 Xcode 工程、写入版本号、构建应用、打包未签名 ipa（CI 也调用这些脚本）
 - `test/`：模拟环境里的测试（`harness.mjs` 模拟浏览器 API，`webkit-rules.mjs` 是 Safari 规则模型，`sampler.mjs` 做正则等价性采样）
 - `engine/`：真实 WebKit 引擎和 Safari 应用里的测试（`host.m` 是加载扩展的宿主程序，`server.mjs` 是本地替身网站，`run.sh` 运行引擎测试的全部场景，`safari-app.sh` 和 `safari-app.mjs` 驱动 Safari 应用，`report.mjs` 汇总并检查结果）
+- `../tools/sync-upstream.mjs`：同步上游的发布文件；`../tools/ci/*.sh`：「Upstream sync」工作流里提交候选、推到 `main`、开关 issue 的步骤；`../tools/release-notes.mjs`：生成 Releases 页面上的说明
+- `../chrome/build.mjs`：给上游的 Chrome 包加上同样的网站修正
+- `../.github/workflows/`：`safari.yml`（构建、测试、打包、发布）、`safari-engine.yml`（引擎测试）、`upstream-sync.yml`（自动同步上游）
