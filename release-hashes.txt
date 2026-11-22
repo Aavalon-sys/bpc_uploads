@@ -1,22 +1,22 @@
 SHA256 hash of bypass-paywalls-chrome-clean-4.4.9.0.crx:
 3ddd914ff8071947ffc91cba8307dda8163fe0d4802cb710afffdf8e1b9b731b
-SHA256 hash of bypass-paywalls-chrome-clean-4.4.9.8.crx:
-2b1cda5c8420835d09817a5f8fe2ba5d2b50885062927f6e42764b570400ba6b
+SHA256 hash of bypass-paywalls-chrome-clean-4.5.0.0.crx:
+ec4fe205002de26c4527d557ffef53e27f75a0803507b3ba67bdaec7038d38b3
 SHA256 hash of bypass-paywalls-chrome-clean-android-custom.crx:
-f58da9feee071611d71959b7926892c27929653a745f2216140a0b85bf72a458
+714eef15f0608d4c43d358fa12c1e28aa9bf8b45c34a0d61a5780dfcd7bdcde8
 SHA256 hash of bypass-paywalls-chrome-clean-latest.crx:
-2b1cda5c8420835d09817a5f8fe2ba5d2b50885062927f6e42764b570400ba6b
+ec4fe205002de26c4527d557ffef53e27f75a0803507b3ba67bdaec7038d38b3
 SHA256 hash of bypass-paywalls-chrome-clean-master.zip:
-841e60e95bb7c06a754d09a5cc7336c2e8088f2468069cc13b4ff5f666bba940
+5390893ccdcd56ab893fbd4a1257795efbe61a53af3a2c280b1cd96b4d896951
 SHA256 hash of bypass-paywalls-firefox-clean-master.zip:
-7653935c19e375fc661d0c1a5fa4d6288ab28b757652d2f87b0559334f80b991
+cf0d82c068cd7f0c92dfb8ccabca61dffaf5ee212328432b38c56bfc1485cb67
 SHA256 hash of bypass_paywalls_clean-4.4.9.0-custom.xpi:
 b24ae46df86afe48f8a7cd1aee9d0c0df8c416779cdb583e51b05bb740a79803
 SHA256 hash of bypass_paywalls_clean-4.4.9.0.xpi:
 c5d901dd41b0648edac0b5ce877cd3e2cba51ff1732f37206eba4dc7fa2acd30
-SHA256 hash of bypass_paywalls_clean-4.4.9.8-custom.xpi:
-c4a8bcef44c6d38e793a82594ae34b5ad2eee579b060bfb9aa50bb642cd75921
-SHA256 hash of bypass_paywalls_clean-4.4.9.8.xpi:
-8b96683d994774c77f77bcc0b6d26446239eb5be73795fdd505b9d143bdb0981
+SHA256 hash of bypass_paywalls_clean-4.5.0.0-custom.xpi:
+5040fa85682885506d4a7e49c58de264d93353d6564578547cf684819b06f12b
+SHA256 hash of bypass_paywalls_clean-4.5.0.0.xpi:
+85436966aa8ae4f04c3dac7f1858a1efd9d823d6beb7940dc10fd1c51b19d853
 SHA256 hash of bypass_paywalls_clean-latest.xpi:
-8b96683d994774c77f77bcc0b6d26446239eb5be73795fdd505b9d143bdb0981
+85436966aa8ae4f04c3dac7f1858a1efd9d823d6beb7940dc10fd1c51b19d853
